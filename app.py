@@ -12,10 +12,7 @@ import streamlit as st
 #                    둘 중 싼 것:   아이템A | 아이템B, 수량
 
 # [경매장 합산] 탭 기본 목록
-DEFAULT_AUCTION_ITEMS = """\
-기억의 보석, 10
-환생의 비약, 5
-"""
+DEFAULT_AUCTION_ITEMS = ""   # 비워두면 빈 칸으로 시작 (예시는 입력칸에 흐리게 보임)
 
 # [패키지 효율] 탭 기본값 — 패키지 1개에 들어있는 구성품
 DEFAULT_PACKAGE_NAME = "내 패키지"
@@ -172,6 +169,18 @@ def run_pricing(api_key, text, use_fallback):
         return None
 
 
+def kgold(n):
+    """큰 숫자를 억/만 단위로: 5,266,948,470 → '52억 6,694만'"""
+    n = int(n)
+    eok, man = divmod(abs(n) // 10_000, 10_000)
+    sign = "-" if n < 0 else ""
+    if eok:
+        return f"{sign}{eok:,}억 {man:,}만" if man else f"{sign}{eok:,}억"
+    if man:
+        return f"{sign}{man:,}만"
+    return f"{n:,}"
+
+
 def show_table(rows, total=None):
     df = pd.DataFrame(rows)
     if total and "소계" in df:
@@ -204,6 +213,7 @@ with tab_auction:
     a_text = st.text_area(
         "아이템 목록 — 한 줄에 `이름, 수량` / 둘 중 싼 것은 `이름A | 이름B, 수량`",
         value=DEFAULT_AUCTION_ITEMS, height=200, key="a_text",
+        placeholder="예)\n기억의 보석, 10\n보호의 6단계 푸른 개조석 | 보호의 6단계 붉은 개조석, 2",
     )
     if st.button("합산하기", type="primary", width="stretch", key="a_btn"):
         res = run_pricing(api_key, a_text, use_fallback)
@@ -214,8 +224,9 @@ with tab_auction:
         rows, total, missing = st.session_state["a_res"]
         warn_missing(missing)
         m1, m2 = st.columns(2)
-        m1.metric("합계", f"{total:,} 골드")
-        m2.metric("판매 시 수령액 (수수료 4% 제외)", f"{round(total * (1 - FEE_RATE)):,} 골드")
+        m1.metric("합계", f"{kgold(total)} 골드", help=f"{total:,} 골드")
+        net = round(total * (1 - FEE_RATE))
+        m2.metric("판매 시 수령액 (수수료 4% 제외)", f"{kgold(net)} 골드", help=f"{net:,} 골드")
         show_table(rows, total)
 
 # ---------------------------- 패키지 효율 ----------------------------
@@ -260,10 +271,12 @@ with tab_package:
         won_per_m = round(p_price * GOLD_UNIT / one_net_m) if one_net_m else 0
 
         st.subheader(f"{p_name} × {p_count:,}개")
-        k1, k2, k3 = st.columns(3)
-        k1.metric("총 결제 금액", f"{p_price * p_count:,}원")
-        k2.metric("되팔면 (수수료 제외)", f"{one_net * p_count:,} 골드")
-        k3.metric("마일리지 포함", f"{one_net_m * p_count:,} 골드")
+        st.metric("총 결제 금액", f"{p_price * p_count:,}원")
+        k2, k3 = st.columns(2)
+        k2.metric("되팔면 (수수료 제외)", f"{kgold(one_net * p_count)} 골드",
+                  help=f"{one_net * p_count:,} 골드")
+        k3.metric("마일리지 포함", f"{kgold(one_net_m * p_count)} 골드",
+                  help=f"{one_net_m * p_count:,} 골드")
 
         st.subheader("1000숲을 얼마에 사는 셈?")
         w1, w2 = st.columns(2)
