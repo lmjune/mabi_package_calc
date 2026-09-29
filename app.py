@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""마비노기 경매장 계산기 (웹) — 경매장 합산 · 패키지 효율 · 오늘의 득템운"""
+"""모험가 수첩 (웹) — 경매장 합산 · 패키지 효율 · 오늘의 득템운"""
 import os
 
 import pandas as pd
@@ -57,8 +57,8 @@ def warn_missing(res):
 
 
 # ================================ 화면 ================================
-st.set_page_config(page_title="마비 경매장 계산기", page_icon="💰")
-st.title("💰 마비 경매장 계산기")
+st.set_page_config(page_title="모험가 수첩", page_icon="📔")
+st.title("📔 모험가 수첩")
 
 api_key = get_api_key()
 if not api_key:
