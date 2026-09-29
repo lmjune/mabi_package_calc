@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 마비노기 길드 디스코드 봇
-  /득템운  /시세  /합산  /패키지  /봇상태
+  /득템운  /시세  /합산  /패키지  /스팀할인  /봇상태
 
 실행:  python -m bot.main      (저장소 맨 위 폴더에서)
 필요한 환경변수(.env): DISCORD_TOKEN, NEXON_API_KEY, ALLOWED_GUILD_IDS
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import settings                                   # noqa: E402
-from core import auction, tarot                   # noqa: E402
+from core import auction, steam, tarot            # noqa: E402
 from bot.card_image import compose                # noqa: E402
 
 log = logging.getLogger("mabi-bot")
@@ -370,6 +370,77 @@ async def cmd_package(interaction: discord.Interaction, 패키지: str = setting
                                           if r["소계"] is not None else "가격 없음")
         for r in res.rows)
     await interaction.followup.send(embed=e, view=DetailView(detail))
+
+
+# ============================== /스팀할인 ==============================
+STEAM_PAGE = 10
+STEAM_COLOR = 0x1B2838
+
+
+def _md(text):
+    return text.replace("[", "(").replace("]", ")").replace("*", "").replace("_", " ")
+
+
+class SteamView(discord.ui.View):
+    def __init__(self, deals, total, title):
+        super().__init__(timeout=600)
+        self.deals, self.total, self.title, self.page = deals, total, title, 0
+        self._sync()
+
+    @property
+    def pages(self):
+        return max(1, -(-len(self.deals) // STEAM_PAGE))
+
+    def embed(self):
+        chunk = self.deals[self.page * STEAM_PAGE:(self.page + 1) * STEAM_PAGE]
+        lines = []
+        for i, d in enumerate(chunk, self.page * STEAM_PAGE + 1):
+            line = f"**{i}. [{_md(d.name)}]({d.url})**\n`-{d.discount}%` ~~{d.original}~~ → **{d.final}**"
+            if d.review:
+                line += f" · {d.review}"
+            lines.append(line)
+        e = discord.Embed(title=self.title, color=STEAM_COLOR,
+                          description="\n".join(lines) or "조건에 맞는 할인 게임이 없어요.")
+        if chunk and chunk[0].image:
+            e.set_thumbnail(url=chunk[0].image)
+        e.set_footer(text=f"{self.page + 1}/{self.pages} 페이지 · 스팀 전체 할인 {self.total:,}개 중 · "
+                          f"한국 스토어 기준 · 30분마다 갱신")
+        return e
+
+    def _sync(self):
+        self.prev.disabled = self.page == 0
+        self.next.disabled = self.page >= self.pages - 1
+
+    @discord.ui.button(label="◀ 이전", style=discord.ButtonStyle.secondary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="다음 ▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self._sync()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+
+@tree.command(name="스팀할인", description="지금 스팀에서 할인 중인 게임 목록")
+@app_commands.describe(정렬="목록 정렬 방식", 최소할인="이 할인율(%) 이상만", 검색어="게임 이름으로 찾기",
+                       나만보기="결과를 나에게만 보여주기")
+@app_commands.choices(정렬=[app_commands.Choice(name=n, value=n) for n in steam.SORTS])
+async def cmd_steam(interaction: discord.Interaction, 정렬: str = "인기순",
+                    최소할인: app_commands.Range[int, 0, 99] = 0, 검색어: str = "", 나만보기: bool = False):
+    await interaction.response.defer(thinking=True, ephemeral=나만보기)
+    try:
+        deals, total = await run_blocking(steam.fetch_deals, 정렬, 0, 50, 검색어.strip())
+    except Exception as e:
+        log.exception("스팀 조회 실패", exc_info=e)
+        await interaction.followup.send("⚠️ 스팀 할인 목록을 가져오지 못했어요. 잠시 후 다시 해주세요.")
+        return
+    deals = [d for d in deals if d.discount >= 최소할인]
+    title = f"🎮 스팀 할인 · {정렬}" + (f" · {최소할인}% 이상" if 최소할인 else "") + (f" · '{검색어}'" if 검색어 else "")
+    view = SteamView(deals, total, title)
+    await interaction.followup.send(embed=view.embed(), view=view if view.pages > 1 else discord.utils.MISSING)
 
 
 # ============================== /봇상태 ==============================
