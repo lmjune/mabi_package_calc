@@ -29,32 +29,34 @@ class Deal:
     appid: str
     name: str
     url: str
-    discount: int          # 할인율 %
-    original: str          # "₩ 54,900"
-    final: str             # "₩ 27,450"
+    discount: int          # 할인율 % (0 = 할인 없음)
+    original: str          # "₩ 54,900" (할인 없으면 "")
+    final: str             # "₩ 27,450" (가격 정보 없으면 "")
     final_value: int       # 27450
     review: str            # "매우 긍정적 94%" (없으면 "")
     image: str
 
 
-def _parse(results_html):
+def _parse(results_html, discounted_only=True):
     soup = BeautifulSoup(results_html, "html.parser")
     deals = []
     for a in soup.select("a.search_result_row"):
-        block = a.select_one(".discount_block")
+        # 할인 중: class="discount_block search_discount_block"
+        # 할인 없음: class="search_discount_block ... no_discount"
+        block = a.select_one(".search_discount_block") or a.select_one(".discount_block")
         title = a.select_one(".title")
-        if not block or not title:
+        if not title:
             continue
         try:
-            discount = int(block.get("data-discount") or 0)
+            discount = int((block.get("data-discount") if block else 0) or 0)
         except ValueError:
             discount = 0
-        if discount <= 0:
+        if discounted_only and discount <= 0:
             continue
         orig = a.select_one(".discount_original_price")
         final = a.select_one(".discount_final_price")
         try:
-            final_value = int(block.get("data-price-final") or 0) // 100
+            final_value = int((block.get("data-price-final") if block else 0) or 0) // 100
         except ValueError:
             final_value = 0
         review = ""
@@ -83,20 +85,27 @@ _cache, _lock = {}, threading.Lock()
 
 
 def fetch_deals(sort="인기순", start=0, count=25, keyword=""):
-    """할인 중인 게임 목록 (list[Deal], 전체 개수)"""
+    """
+    검색어 없음: 할인 중인 게임만 (정렬 적용)
+    검색어 있음: 할인 여부와 상관없이 이름으로 찾기 (sort=None 이면 관련도순)
+    반환: (list[Deal], 전체 개수)
+    """
     key = (sort, start, count, keyword)
     with _lock:
         hit = _cache.get(key)
         if hit and time.time() - hit[0] < CACHE_TTL:
             return hit[1]
-    params = {"specials": 1, "infinite": 1, "cc": "kr", "l": "korean",
-              "start": start, "count": count, **SORTS.get(sort, {})}
+    params = {"infinite": 1, "cc": "kr", "l": "korean", "start": start, "count": count,
+              **SORTS.get(sort, {})}
     if keyword:
         params["term"] = keyword
+    else:
+        params["specials"] = 1
     r = requests.get(SEARCH_URL, params=params, headers=HEADERS, timeout=15)
     r.raise_for_status()
     data = r.json()
-    value = (_parse(data.get("results_html") or ""), int(data.get("total_count") or 0))
+    value = (_parse(data.get("results_html") or "", discounted_only=not keyword),
+             int(data.get("total_count") or 0))
     with _lock:
         _cache[key] = (time.time(), value)
     return value

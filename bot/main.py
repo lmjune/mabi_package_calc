@@ -382,9 +382,10 @@ def _md(text):
 
 
 class SteamView(discord.ui.View):
-    def __init__(self, deals, total, title):
+    def __init__(self, deals, total, title, searching=False):
         super().__init__(timeout=600)
         self.deals, self.total, self.title, self.page = deals, total, title, 0
+        self.searching = searching
         self._sync()
 
     @property
@@ -395,16 +396,24 @@ class SteamView(discord.ui.View):
         chunk = self.deals[self.page * STEAM_PAGE:(self.page + 1) * STEAM_PAGE]
         lines = []
         for i, d in enumerate(chunk, self.page * STEAM_PAGE + 1):
-            line = f"**{i}. [{_md(d.name)}]({d.url})**\n`-{d.discount}%` ~~{d.original}~~ → **{d.final}**"
+            if d.discount > 0:
+                price = f"`-{d.discount}%` ~~{d.original}~~ → **{d.final}**"
+            elif d.final:
+                price = f"할인 없음 · **{d.final}**"
+            else:
+                price = "가격 정보 없음 (출시 예정 등)"
+            line = f"**{i}. [{_md(d.name)}]({d.url})**\n{price}"
             if d.review:
                 line += f" · {d.review}"
             lines.append(line)
         e = discord.Embed(title=self.title, color=STEAM_COLOR,
-                          description="\n".join(lines) or "조건에 맞는 할인 게임이 없어요.")
+                          description="\n".join(lines) or (
+                              "검색 결과가 없어요. 이름을 다르게 입력해 보세요." if self.searching
+                              else "조건에 맞는 할인 게임이 없어요."))
         if chunk and chunk[0].image:
             e.set_thumbnail(url=chunk[0].image)
-        e.set_footer(text=f"{self.page + 1}/{self.pages} 페이지 · 스팀 전체 할인 {self.total:,}개 중 · "
-                          f"한국 스토어 기준 · 30분마다 갱신")
+        scope = f"검색 결과 {self.total:,}개 중" if self.searching else f"스팀 전체 할인 {self.total:,}개 중"
+        e.set_footer(text=f"{self.page + 1}/{self.pages} 페이지 · {scope} · 한국 스토어 기준 · 30분마다 갱신")
         return e
 
     def _sync(self):
@@ -425,21 +434,29 @@ class SteamView(discord.ui.View):
 
 
 @tree.command(name="스팀할인", description="지금 스팀에서 할인 중인 게임 목록")
-@app_commands.describe(정렬="목록 정렬 방식", 최소할인="이 할인율(%) 이상만", 검색어="게임 이름으로 찾기",
+@app_commands.describe(정렬="목록 정렬 방식 (검색어가 있으면 기본은 관련도순)", 최소할인="이 할인율(%) 이상만",
+                       검색어="게임 이름으로 찾기 (할인 안 하는 게임도 가격과 함께 나와요)",
                        나만보기="결과를 나에게만 보여주기")
 @app_commands.choices(정렬=[app_commands.Choice(name=n, value=n) for n in steam.SORTS])
-async def cmd_steam(interaction: discord.Interaction, 정렬: str = "인기순",
+async def cmd_steam(interaction: discord.Interaction, 정렬: str = None,
                     최소할인: app_commands.Range[int, 0, 99] = 0, 검색어: str = "", 나만보기: bool = False):
     await interaction.response.defer(thinking=True, ephemeral=나만보기)
+    keyword = 검색어.strip()
+    sort = 정렬 or (None if keyword else "인기순")
     try:
-        deals, total = await run_blocking(steam.fetch_deals, 정렬, 0, 50, 검색어.strip())
+        deals, total = await run_blocking(steam.fetch_deals, sort, 0, 20 if keyword else 50, keyword)
     except Exception as e:
         log.exception("스팀 조회 실패", exc_info=e)
         await interaction.followup.send("⚠️ 스팀 할인 목록을 가져오지 못했어요. 잠시 후 다시 해주세요.")
         return
     deals = [d for d in deals if d.discount >= 최소할인]
-    title = f"🎮 스팀 할인 · {정렬}" + (f" · {최소할인}% 이상" if 최소할인 else "") + (f" · '{검색어}'" if 검색어 else "")
-    view = SteamView(deals, total, title)
+    if keyword:
+        title = f"🎮 스팀 검색 · '{keyword}'" + (f" · {sort}" if sort else "")
+    else:
+        title = f"🎮 스팀 할인 · {sort}"
+    if 최소할인:
+        title += f" · {최소할인}% 이상 할인"
+    view = SteamView(deals, total, title, searching=bool(keyword))
     await interaction.followup.send(embed=view.embed(), view=view if view.pages > 1 else discord.utils.MISSING)
 
 
