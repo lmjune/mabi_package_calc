@@ -1,4 +1,4 @@
-# 마비 경매장 계산기 + 길드 디스코드 봇
+# 📔 모험가 수첩 — 마비노기 경매장 계산기 + 길드 디스코드 봇
 
 - **웹 (Streamlit)** — 경매장 합산 · 패키지 효율 · 오늘의 득템운
 - **디스코드 봇** — `/득템운` `/시세` `/합산` `/패키지` `/봇상태` (허용한 서버에서만 동작)
@@ -70,7 +70,17 @@ python -m bot.main
 `로그인: ...` 과 `서버 ... 에 명령어 5개 등록`이 나오면 성공. 디스코드에서 `/`를 치면 명령어가 보여요.
 (명령어가 안 보이면 디스코드를 Ctrl+R로 새로고침)
 
-### 3-3. 24시간 켜두기 (리눅스 서버)
+### 3-3. 24시간 켜두기 — Railway (추천)
+저장소의 `Dockerfile`, `railway.json`을 Railway가 자동으로 읽어요.
+1. https://railway.com → **New Project → Deploy from GitHub repo** → `mabi_package_calc` 선택
+   (처음이면 GitHub 연결 권한 허용)
+2. 만들어진 서비스 클릭 → **Variables** 탭 → 3개 추가
+   `DISCORD_TOKEN`, `NEXON_API_KEY`, `ALLOWED_GUILD_IDS`
+3. 변수를 저장하면 자동으로 다시 배포돼요. **Deployments → View Logs**에
+   `로그인: ...`, `서버 ... 에 명령어 5개 등록`이 보이면 성공.
+4. 이후엔 GitHub에 push만 하면 봇도 자동으로 업데이트돼요.
+
+### 3-3b. 24시간 켜두기 — 직접 리눅스 서버 (Oracle 등)
 Oracle Cloud 무료 VM, 저가 VPS 등 어디든 Ubuntu 기준:
 ```bash
 sudo apt update && sudo apt install -y python3-venv git
@@ -89,7 +99,7 @@ sudo systemctl status mabi-bot           # 상태 확인
 journalctl -u mabi-bot -f                # 로그 보기
 ```
 
-### 3-4. 코드 고친 뒤 봇 업데이트
+### 3-4. 코드 고친 뒤 봇 업데이트 (직접 서버일 때)
 ```bash
 cd mabi_package_calc && git pull && sudo systemctl restart mabi-bot
 ```
