@@ -65,8 +65,14 @@ class MabiBot(discord.Client):
         for gid in ALLOWED_GUILDS:
             guild = discord.Object(id=gid)
             self.tree.copy_global_to(guild=guild)
-            cmds = await self.tree.sync(guild=guild)
-            log.info("서버 %s 에 명령어 %d개 등록", gid, len(cmds))
+            try:
+                cmds = await self.tree.sync(guild=guild)
+                log.info("서버 %s 에 명령어 %d개 등록", gid, len(cmds))
+            except discord.Forbidden:
+                log.error("서버 %s 에 명령어를 등록하지 못했어요 (Missing Access). "
+                          "① 봇이 그 서버에 초대됐는지 ② 서버 ID가 맞는지 "
+                          "③ 초대 링크에 applications.commands 스코프가 있었는지 확인해 주세요. "
+                          "초대한 뒤 봇을 재시작하면 등록돼요.", gid)
 
     async def on_ready(self):
         log.info("로그인: %s", self.user)
@@ -381,7 +387,7 @@ def main():
     missing = [k for k, v in {"DISCORD_TOKEN": TOKEN, "NEXON_API_KEY": NEXON_KEY,
                               "ALLOWED_GUILD_IDS": ALLOWED_GUILDS}.items() if not v]
     if missing:
-        sys.exit(f".env 에 다음 값이 필요해요: {', '.join(missing)}")
+        sys.exit(f"환경변수가 필요해요 (PC는 .env 파일, Railway는 Variables 탭): {', '.join(missing)}")
     bot.run(TOKEN, log_handler=None)
 
 
