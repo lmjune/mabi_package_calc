@@ -1,0 +1,18 @@
+# 리눅스 서버에서 봇을 24시간 켜두는 설정 (systemd)
+# 1) 아래 User 와 경로 2곳을 내 서버에 맞게 고치고
+# 2) sudo cp deploy/mabi-bot.service /etc/systemd/system/
+# 3) sudo systemctl daemon-reload && sudo systemctl enable --now mabi-bot
+[Unit]
+Description=Mabinogi guild Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mabi_package_calc
+ExecStart=/home/ubuntu/mabi_package_calc/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
