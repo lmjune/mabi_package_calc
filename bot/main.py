@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 마비노기 길드 디스코드 봇
-  /득템운  /시세  /합산  /패키지  /스팀할인  /봇상태
+  /득템운  /시세  /합산  /패키지  /스팀할인  /메뉴  /봇상태
 
 실행:  python -m bot.main      (저장소 맨 위 폴더에서)
 필요한 환경변수(.env): DISCORD_TOKEN, NEXON_API_KEY, ALLOWED_GUILD_IDS
@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 import settings                                   # noqa: E402
 from core import auction, steam, tarot            # noqa: E402
+from core import menus as menu_data               # noqa: E402
 from bot.card_image import compose                # noqa: E402
 
 log = logging.getLogger("mabi-bot")
@@ -458,6 +459,190 @@ async def cmd_steam(interaction: discord.Interaction, 정렬: str = None,
         title += f" · {최소할인}% 이상 할인"
     view = SteamView(deals, total, title, searching=bool(keyword))
     await interaction.followup.send(embed=view.embed(), view=view if view.pages > 1 else discord.utils.MISSING)
+
+
+# ============================== /메뉴 ==============================
+MENU_COLOR = 0xF28C38
+REROLL_TEASE = {3: "슬슬 정하시죠…", 5: "결정장애 감지 🚨", 8: "그냥 김치찌개 드세요.", 12: "봇이 배고파졌어요."}
+
+
+def default_meal_time():
+    h = tarot.dt.datetime.now(tarot.KST).hour
+    return "점심" if 5 <= h < 15 else "저녁"
+
+
+def menu_line(m):
+    return f"{menu_data.KIND_EMOJI.get(m['kind'], '🍽️')} {m['kind']} · {menu_data.PRICE_LABEL[m['price']]}" + \
+           (" · 🙋 혼밥 OK" if m["solo"] else "")
+
+
+def cond_text(cond):
+    parts = [cond["time"]]
+    if cond["solo"]:
+        parts.append("혼밥")
+    if cond["kind"]:
+        parts.append(cond["kind"])
+    if cond["max_price"] < 3:
+        parts.append({1: "~1.2만 원", 2: "~2.5만 원"}[cond["max_price"]])
+    if cond["exclude"]:
+        parts.append("제외: " + ", ".join(cond["exclude"]))
+    return " · ".join(parts)
+
+
+class MenuView(discord.ui.View):
+    def __init__(self, cond, owner_name):
+        super().__init__(timeout=900)
+        self.cond, self.owner_name = cond, owner_name
+        self.history, self.rolls, self.current = [], 0, None
+        self.roll()
+
+    def roll(self):
+        got = menu_data.pick(1, avoid=self.history[-10:], **self.cond)
+        self.current = got[0] if got else None
+        if self.current:
+            self.history.append(self.current["name"])
+        self.rolls += 1
+
+    def embed(self, decided_by=None):
+        c = self.cond
+        if not self.current:
+            return discord.Embed(title="🍽️ 조건에 맞는 메뉴가 없어요",
+                                 description="조건을 조금 풀어서 다시 해보세요.", color=MENU_COLOR)
+        if decided_by:
+            e = discord.Embed(title=f"✅ 오늘 {c['time']}은 결정!", color=0x3BA55C,
+                              description=f"## {self.current['name']}\n{menu_line(self.current)}")
+            e.set_footer(text=f"{decided_by}님이 결정했어요 · 다시 뽑기 {self.rolls - 1}회")
+            return e
+        e = discord.Embed(title=f"🍽️ 오늘 {c['time']} 메뉴는…", color=MENU_COLOR,
+                          description=f"## {self.current['name']}\n{menu_line(self.current)}")
+        tease = REROLL_TEASE.get(self.rolls - 1)
+        footer = f"조건: {cond_text(c)}"
+        if self.rolls > 1:
+            footer += f" · 다시 뽑기 {self.rolls - 1}회"
+        if tease:
+            footer += f" · {tease}"
+        e.set_footer(text=footer)
+        return e
+
+    @discord.ui.button(label="🔄 다시 뽑기", style=discord.ButtonStyle.secondary)
+    async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.roll()
+        await interaction.response.edit_message(embed=self.embed(), view=self)
+
+    @discord.ui.button(label="✅ 이걸로 결정!", style=discord.ButtonStyle.success)
+    async def decide(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for b in self.children:
+            b.disabled = True
+        self.stop()
+        await interaction.response.edit_message(embed=self.embed(decided_by=interaction.user.display_name),
+                                                view=self)
+
+
+class MenuVoteView(discord.ui.View):
+    NUM = ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+
+    def __init__(self, options, cond, owner, seconds):
+        super().__init__(timeout=seconds)
+        self.options, self.cond, self.owner = options, cond, owner
+        self.votes = {}              # user_id -> index
+        self.message = None
+        self.closed = False
+        for i, m in enumerate(options):
+            b = discord.ui.Button(label=self._label(i), style=discord.ButtonStyle.primary, row=0)
+            b.callback = self._vote_cb(i)
+            self.add_item(b)
+        end = discord.ui.Button(label="🏁 마감", style=discord.ButtonStyle.danger, row=1)
+        end.callback = self._end_cb
+        self.add_item(end)
+
+    def _count(self, i):
+        return sum(1 for v in self.votes.values() if v == i)
+
+    def _label(self, i):
+        return f"{self.NUM[i]} {self.options[i]['name'][:60]} ({self._count(i)})"
+
+    def embed(self, winner=None):
+        lines = [f"{self.NUM[i]} **{m['name']}** — {menu_line(m)}  `{self._count(i)}표`"
+                 for i, m in enumerate(self.options)]
+        if winner is None:
+            e = discord.Embed(title=f"🗳️ 오늘 {self.cond['time']} 뭐 먹지? 투표!", color=MENU_COLOR,
+                              description="\n".join(lines))
+            e.set_footer(text=f"버튼으로 투표 (바꾸기 가능) · {self.owner.display_name}님이 🏁 마감하거나 시간이 지나면 끝나요")
+        else:
+            e = discord.Embed(title=f"🎉 오늘 {self.cond['time']}은 {winner['name']}!", color=0x3BA55C,
+                              description="\n".join(lines))
+            e.set_footer(text=f"총 {len(self.votes)}명 투표")
+        return e
+
+    def _refresh(self):
+        for i, b in enumerate(self.children[:len(self.options)]):
+            b.label = self._label(i)
+
+    def _vote_cb(self, i):
+        async def cb(interaction: discord.Interaction):
+            self.votes[interaction.user.id] = i
+            self._refresh()
+            await interaction.response.edit_message(embed=self.embed(), view=self)
+        return cb
+
+    async def _end_cb(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner.id:
+            await interaction.response.send_message("투표를 시작한 사람만 마감할 수 있어요.", ephemeral=True)
+            return
+        await self._finish(interaction)
+
+    def _winner(self):
+        import random
+        best = max(self._count(i) for i in range(len(self.options)))
+        tied = [m for i, m in enumerate(self.options) if self._count(i) == best]
+        return random.choice(tied)          # 동점이거나 0표면 그중에서 랜덤
+
+    async def _finish(self, interaction=None):
+        if self.closed:
+            return
+        self.closed = True
+        self.stop()
+        for b in self.children:
+            b.disabled = True
+        winner = self._winner()
+        if interaction:
+            await interaction.response.edit_message(embed=self.embed(winner), view=self)
+        elif self.message:
+            await self.message.edit(embed=self.embed(winner), view=self)
+
+    async def on_timeout(self):
+        try:
+            await self._finish()
+        except discord.HTTPException:
+            pass
+
+
+@tree.command(name="메뉴", description="점심·저녁 메뉴를 골라줘요 (다시 뽑기 / 투표 가능)")
+@app_commands.describe(시간="점심 또는 저녁 (안 고르면 지금 시각 기준)", 혼밥="혼자 먹기 편한 메뉴만",
+                       종류="음식 종류", 예산="1인 기준 대략", 제외="빼고 싶은 메뉴 (쉼표로 여러 개, 예: 짜장, 라면)",
+                       투표="후보 3개를 뽑아서 투표로 정하기")
+@app_commands.choices(
+    시간=[app_commands.Choice(name=n, value=n) for n in ("점심", "저녁")],
+    종류=[app_commands.Choice(name=f"{e} {k}", value=k) for k, e in menu_data.KIND_EMOJI.items()],
+    예산=[app_commands.Choice(name="~1.2만 원", value=1), app_commands.Choice(name="~2.5만 원", value=2),
+        app_commands.Choice(name="~5만 원 (상관없음)", value=3)],
+)
+async def cmd_menu(interaction: discord.Interaction, 시간: str = None, 혼밥: bool = False, 종류: str = None,
+                   예산: int = 3, 제외: str = "", 투표: bool = False):
+    cond = {"time": 시간 or default_meal_time(), "solo": 혼밥, "kind": 종류, "max_price": 예산,
+            "exclude": [x.strip() for x in 제외.replace("/", ",").split(",") if x.strip()]}
+    if 투표:
+        options = menu_data.pick(3, **cond)
+        if len(options) < 2:
+            await interaction.response.send_message("조건에 맞는 메뉴가 2개도 안 돼서 투표를 못 해요. 조건을 풀어주세요.",
+                                                    ephemeral=True)
+            return
+        view = MenuVoteView(options, cond, interaction.user, seconds=180)
+        await interaction.response.send_message(embed=view.embed(), view=view)
+        view.message = await interaction.original_response()
+        return
+    view = MenuView(cond, interaction.user.display_name)
+    await interaction.response.send_message(embed=view.embed(), view=view if view.current else discord.utils.MISSING)
 
 
 # ============================== /봇상태 ==============================
