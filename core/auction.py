@@ -8,6 +8,7 @@
 - 오늘(KST) 호출 수를 세고, 하루 한도 직전에는 새 조회를 막음
 """
 import datetime as dt
+import logging
 import re
 import threading
 import time
@@ -16,6 +17,8 @@ from dataclasses import dataclass, field
 import requests
 
 import settings
+
+log = logging.getLogger("mabi-api")
 
 BASE_URL = "https://open.api.nexon.com/mabinogi/v1/auction"
 MIN_INTERVAL = 0.22        # 초당 약 4.5건
@@ -28,7 +31,9 @@ class QuotaExceeded(RuntimeError):
 
 
 class ApiError(RuntimeError):
-    pass
+    def __init__(self, msg, code=None):
+        super().__init__(msg)
+        self.code = code
 
 
 # ============================== 저수준 호출 ==============================
@@ -82,7 +87,8 @@ def _get(api_key, path, params):
             err = r.json().get("error", {})
         except ValueError:
             err = {"message": r.text}
-        raise ApiError(f"API 오류 {r.status_code}: {err.get('name')} {err.get('message')}")
+        log.warning("넥슨 API %s %s → %s %s", path, params, r.status_code, err)
+        raise ApiError(f"API 오류 {r.status_code}: {err.get('name')} {err.get('message')}", err.get("name"))
     raise ApiError("요청이 너무 많아 재시도 횟수를 초과했어요. 잠시 후 다시 해주세요.")
 
 
@@ -209,7 +215,21 @@ def keyword_search(api_key, text):
     words = keyword_words(text)
     if not words:
         return []
-    rows = _cached(("keyword", tuple(words)), lambda: _keyword_fetch(api_key, words))
+    try:
+        rows = _cached(("keyword", tuple(words)), lambda: _keyword_fetch(api_key, words))
+    except ApiError as e:
+        if e.code != "OPENAPI00004":
+            raise
+        # 넥슨이 받아주지 않는 검색어(너무 짧은 단어 등) → 한 글자 단어를 빼고 한 번 더, 그래도 안 되면 '결과 없음'
+        longer = [w for w in words if len(w) >= 2]
+        if not longer or longer == words:
+            return []
+        try:
+            rows = _cached(("keyword", tuple(longer)), lambda: _keyword_fetch(api_key, longer))
+        except ApiError as e2:
+            if e2.code != "OPENAPI00004":
+                raise
+            return []
     groups = {}
     for x in rows:
         g = groups.setdefault(x["item_name"], [])

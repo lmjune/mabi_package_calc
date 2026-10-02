@@ -98,6 +98,9 @@ async def run_blocking(func, *args, **kw):
 
 
 def error_text(e):
+    if isinstance(e, auction.ApiError) and e.code == "OPENAPI00004":
+        return ("⚠️ 넥슨 API가 이 검색어를 받지 않았어요 (잘못된 파라미터). "
+                "아이템 이름을 다시 확인하거나 다른 단어로 찾아주세요.")
     if isinstance(e, (auction.QuotaExceeded, auction.ApiError)):
         return f"⚠️ {e}"
     log.exception("처리 중 오류", exc_info=e)
