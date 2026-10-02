@@ -241,27 +241,35 @@ def keyword_search(api_key, text):
 
 def smart_search(api_key, text, max_probes=3):
     """
-    띄어쓰기가 달라도 찾기 (예: '브리레흐의 정수', '브리레흐의정수' → '브리 레흐의 정수')
+    띄어쓰기가 달라도 찾기 (예: '브리레흐' → '브리 레흐의 정수', '브리 레흐 던전 통행증' …)
     1) 입력 그대로 키워드 검색
-    2) 안 되면 짧은 단어(끝 2~3글자, 각 단어)로 넓게 검색한 뒤, 공백을 무시하고 입력과 맞는 이름만 남김
-    추가 호출은 최대 max_probes 번 (결과는 10분 캐시)
+    2) 짧은 단어(끝 2~3글자, 각 단어, 앞 2글자)로도 넓게 검색해서, 공백을 무시하고 입력이 들어간 이름을 모두 모음
+       (넥슨 검색은 단어가 정확히 같아야 해서 '레흐'로는 '레흐의'가 안 걸리기 때문)
+    3) 봇이 전에 본 이름 중 맞는 것도 추가 (호출 없음)
+    추가 호출은 최대 max_probes 번, 결과는 10분 캐시
     """
-    found = keyword_search(api_key, text)
-    if found:
-        return found
     target = _squash(text)
-    if len(target) < 2:
-        return []
     words = keyword_words(text)
-    probes = []
-    for p in [target[-2:], target[-3:], *sorted(words, key=len), target[:2]]:
-        if len(p) >= 2 and p not in probes and p != " ".join(words):
-            probes.append(p)
-    for p in probes[:max_probes]:
-        hits = [f for f in keyword_search(api_key, p) if target in _squash(f.name)]
-        if hits:
-            return hits
-    return []
+    merged = {f.name: f for f in keyword_search(api_key, text)}
+    if text.strip() in merged:                      # 정확한 이름이면 더 찾을 필요 없음
+        return list(merged.values())
+
+    if len(target) >= 2:
+        probes = []
+        for p in [target[-2:], target[-3:], *sorted(words, key=len), target[:2]]:
+            if len(p) >= 2 and p not in probes and p != " ".join(words):
+                probes.append(p)
+        for p in probes[:max_probes]:
+            for f in keyword_search(api_key, p):
+                if target in _squash(f.name) and f.name not in merged:
+                    merged[f.name] = f
+
+    for n in local_matches(text, 50):
+        merged.setdefault(n, Found(n, None, 0))
+
+    found = list(merged.values())
+    found.sort(key=lambda f: (f.list_min is None, -f.list_count, f.name))
+    return found
 
 
 # ============================== 가격 ==============================
