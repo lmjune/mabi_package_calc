@@ -239,6 +239,31 @@ def keyword_search(api_key, text):
     return found
 
 
+def smart_search(api_key, text, max_probes=3):
+    """
+    띄어쓰기가 달라도 찾기 (예: '브리레흐의 정수', '브리레흐의정수' → '브리 레흐의 정수')
+    1) 입력 그대로 키워드 검색
+    2) 안 되면 짧은 단어(끝 2~3글자, 각 단어)로 넓게 검색한 뒤, 공백을 무시하고 입력과 맞는 이름만 남김
+    추가 호출은 최대 max_probes 번 (결과는 10분 캐시)
+    """
+    found = keyword_search(api_key, text)
+    if found:
+        return found
+    target = _squash(text)
+    if len(target) < 2:
+        return []
+    words = keyword_words(text)
+    probes = []
+    for p in [target[-2:], target[-3:], *sorted(words, key=len), target[:2]]:
+        if len(p) >= 2 and p not in probes and p != " ".join(words):
+            probes.append(p)
+    for p in probes[:max_probes]:
+        hits = [f for f in keyword_search(api_key, p) if target in _squash(f.name)]
+        if hits:
+            return hits
+    return []
+
+
 # ============================== 가격 ==============================
 def min_price(api_key, item_name, use_fallback=True):
     """(최저 개당가, 출처) / 없으면 (None, None)"""

@@ -308,7 +308,7 @@ async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보�
                 return
 
         # 2) 넥슨 키워드 검색 (현재 매물에서 이름 일부로 찾기, 호출 1번)
-        found = await run_blocking(auction.keyword_search, NEXON_KEY, text)
+        found = await run_blocking(auction.smart_search, NEXON_KEY, text)
         note = "현재 경매장에 매물이 있는 아이템만 찾을 수 있어요"
 
         # 3) 그래도 없으면 봇이 지금까지 본 이름에서 공백 무시하고 찾기 (호출 없음)
@@ -339,7 +339,7 @@ async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보�
     if q.trade_min is None and q.list_min is None:
         await interaction.followup.send(
             f"🔍 **{text}** 을(를) 찾지 못했어요.\n"
-            "• 이름 일부로 찾을 땐 **단어 단위**로 넣어주세요: `기억의 보석` ⭕ / `기억 보석` ❌ (넥슨 검색 규칙)\n"
+            "• 오타가 없는지 확인해 주세요. 띄어쓰기는 달라도 괜찮아요.\n"
             "• 지금 매물이 하나도 없는 아이템은 정확한 전체 이름으로만 찾을 수 있어요.")
         return
     remember_item(q.item_name)
