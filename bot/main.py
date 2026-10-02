@@ -215,6 +215,7 @@ def remember_item(name):
         _recent_items.remove(name)
     _recent_items.insert(0, name)
     del _recent_items[50:]
+    auction.remember_names([name])
 
 
 def known_items():
@@ -227,32 +228,119 @@ def known_items():
 
 
 async def item_autocomplete(interaction, current: str):
-    cur = current.replace(" ", "")
-    hits = [n for n in known_items() if cur in n.replace(" ", "")]
-    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in hits[:25]]
+    # API 호출 없이: 최근 조회 + 패키지 구성품 + 지금까지 봇이 본 아이템 이름
+    q = current.replace(" ", "")
+    base = [n for n in known_items() if q in n.replace(" ", "")]
+    more = [n for n in auction.local_matches(current, 50) if n not in base] if q else []
+    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in (base + more)[:25]]
 
 
-@tree.command(name="시세", description="아이템 하나의 경매장 최저가 (최근 1시간 거래 · 현재 매물)")
-@app_commands.describe(아이템="경매장에 표시되는 정확한 이름", 나만보기="결과를 나에게만 보여주기")
-@app_commands.autocomplete(아이템=item_autocomplete)
-async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보기: bool = False):
-    await interaction.response.defer(thinking=True, ephemeral=나만보기)
-    try:
-        q = await run_blocking(auction.quote, NEXON_KEY, 아이템.strip())
-    except Exception as e:
-        await interaction.followup.send(error_text(e))
-        return
-    if q.trade_min is None and q.list_min is None:
-        await interaction.followup.send(f"🔍 **{아이템}** 은(는) 거래 내역도 매물도 없어요. 이름을 정확히 입력했는지 확인해 주세요.")
-        return
-    remember_item(q.item_name)
-    e = discord.Embed(title=f"🔍 {q.item_name}", color=GOLD_COLOR)
+def quote_embed(q, note=""):
+    e = discord.Embed(title=f"🔍 {q.item_name}", color=GOLD_COLOR, description=note or None)
     e.add_field(name="최근 1시간 거래 최저가",
                 value=f"**{q.trade_min:,}** 골드\n({q.trade_count}건)" if q.trade_min is not None else "거래 없음")
     e.add_field(name="현재 매물 최저가",
                 value=f"**{q.list_min:,}** 골드\n({q.list_count}건)" if q.list_min is not None else "매물 없음")
     e.set_footer(text="게임보다 평균 10분 늦게 반영돼요")
-    await interaction.followup.send(embed=e)
+    return e
+
+
+class PickItemView(discord.ui.View):
+    """부분 검색 결과가 여러 개일 때 고르는 메뉴"""
+
+    def __init__(self, found, owner_id):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        options = []
+        for f in found[:25]:
+            desc = (f"현재 최저 {f.list_min:,}골드 · 매물 {f.list_count}건" if f.list_min is not None
+                    else "최근 조회한 아이템")
+            options.append(discord.SelectOption(label=f.name[:100], value=f.name[:100], description=desc[:100]))
+        sel = discord.ui.Select(placeholder="어떤 아이템인가요?", options=options)
+        sel.callback = self._picked
+        self.add_item(sel)
+        self.select = sel
+
+    async def _picked(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("검색한 사람만 고를 수 있어요. `/시세`로 직접 찾아보세요!",
+                                                    ephemeral=True)
+            return
+        name = self.select.values[0]
+        await interaction.response.defer()
+        try:
+            q = await run_blocking(auction.quote, NEXON_KEY, name)
+        except Exception as e:
+            await interaction.edit_original_response(content=error_text(e), embed=None, view=None)
+            return
+        remember_item(name)
+        self.stop()
+        await interaction.edit_original_response(embed=quote_embed(q), view=None)
+
+
+def candidates_embed(text, found, partial_note):
+    lines = [f"• **{f.name}** — " + (f"{f.list_min:,}골드 ({f.list_count}건)" if f.list_min is not None else "최근 조회")
+             for f in found[:15]]
+    more = f"\n… 외 {len(found) - 15}개" if len(found) > 15 else ""
+    e = discord.Embed(title=f"🔍 '{text}' 검색 결과 {len(found)}개", color=GOLD_COLOR,
+                      description="\n".join(lines) + more)
+    e.set_footer(text=partial_note + " · 아래 메뉴에서 골라주세요")
+    return e
+
+
+@tree.command(name="시세", description="아이템 경매장 최저가 (이름 일부만 넣어도 찾아줘요)")
+@app_commands.describe(아이템="아이템 이름 (전체 또는 일부. 예: 기억의 보석 / 개조석 7단계)",
+                       나만보기="결과를 나에게만 보여주기")
+@app_commands.autocomplete(아이템=item_autocomplete)
+async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보기: bool = False):
+    await interaction.response.defer(thinking=True, ephemeral=나만보기)
+    text = 아이템.strip()
+    try:
+        # 1) 이미 아는 정확한 이름이면 바로 시세
+        if text in auction.KNOWN_NAMES or text in known_items():
+            q = await run_blocking(auction.quote, NEXON_KEY, text)
+            if q.trade_min is not None or q.list_min is not None:
+                remember_item(text)
+                await interaction.followup.send(embed=quote_embed(q))
+                return
+
+        # 2) 넥슨 키워드 검색 (현재 매물에서 이름 일부로 찾기, 호출 1번)
+        found = await run_blocking(auction.keyword_search, NEXON_KEY, text)
+        note = "현재 경매장에 매물이 있는 아이템만 찾을 수 있어요"
+
+        # 3) 그래도 없으면 봇이 지금까지 본 이름에서 공백 무시하고 찾기 (호출 없음)
+        if not found:
+            local = auction.local_matches(text)
+            found = [auction.Found(n, None, 0) for n in local]
+            note = "봇이 전에 조회한 이름에서 찾았어요"
+
+        exact = next((f for f in found if f.name == text), None)
+        if exact or len(found) == 1:
+            name = (exact or found[0]).name
+            q = await run_blocking(auction.quote, NEXON_KEY, name)
+            remember_item(name)
+            hint = "" if name == text else f"'{text}' → **{name}** 으로 찾았어요"
+            await interaction.followup.send(embed=quote_embed(q, hint))
+            return
+
+        if found:
+            await interaction.followup.send(embed=candidates_embed(text, found, note),
+                                            view=PickItemView(found, interaction.user.id))
+            return
+
+        # 4) 마지막으로 입력 그대로 조회 (매물은 없고 거래 내역만 있는 경우)
+        q = await run_blocking(auction.quote, NEXON_KEY, text)
+    except Exception as e:
+        await interaction.followup.send(error_text(e))
+        return
+    if q.trade_min is None and q.list_min is None:
+        await interaction.followup.send(
+            f"🔍 **{text}** 을(를) 찾지 못했어요.\n"
+            "• 이름 일부로 찾을 땐 **단어 단위**로 넣어주세요: `기억의 보석` ⭕ / `기억 보석` ❌ (넥슨 검색 규칙)\n"
+            "• 지금 매물이 하나도 없는 아이템은 정확한 전체 이름으로만 찾을 수 있어요.")
+        return
+    remember_item(q.item_name)
+    await interaction.followup.send(embed=quote_embed(q))
 
 
 # ============================== /합산 ==============================

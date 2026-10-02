@@ -8,6 +8,7 @@
 - 오늘(KST) 호출 수를 세고, 하루 한도 직전에는 새 조회를 막음
 """
 import datetime as dt
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -95,7 +96,40 @@ def _fetch_all(api_key, path, list_key, item_name):
         results.extend(data.get(list_key) or [])
         cursor = data.get("next_cursor")
         if not cursor:
+            remember_names(x.get("item_name") for x in results)
             return [x for x in results if x.get("item_name") == item_name]
+
+
+# ============================== 아이템 이름 사전 ==============================
+# 조회하면서 본 아이템 이름을 모아둬요. 자동완성·부분 검색에 써요 (API 호출 없이).
+KNOWN_NAMES = set()
+_names_lock = threading.Lock()
+
+
+def remember_names(names):
+    with _names_lock:
+        KNOWN_NAMES.update(n for n in names if n)
+
+
+def _squash(text):
+    return re.sub(r"\s+", "", text or "")
+
+
+def local_matches(text, limit=25):
+    """공백 무시 부분 일치 (예: '숏소드' → '배틀 숏 소드', '기억 보석' → '기억의 보석'). 짧은 이름·앞부분 일치 우선"""
+    q = _squash(text)
+    if not q:
+        return []
+    words = [w for w in re.split(r"\s+", text.strip()) if w]
+
+    def ok(n):
+        sn = _squash(n)
+        return q in sn or (len(words) > 1 and all(w in sn for w in words))   # '기억 보석' → '기억의 보석'
+
+    with _names_lock:
+        hits = [n for n in KNOWN_NAMES if ok(n)]
+    hits.sort(key=lambda n: (not _squash(n).startswith(q), len(n), n))
+    return hits[:limit]
 
 
 # ============================== 공유 캐시 ==============================
@@ -137,6 +171,52 @@ def listing(api_key, item_name):
     """현재 매물 (공유 캐시)"""
     return _cached(("list", item_name),
                    lambda: _fetch_all(api_key, "list", "auction_item", item_name))
+
+
+def keyword_words(text):
+    """검색어 → 넥슨 키워드 검색 형식 (한글·영문·숫자 단어, 최대 10개)"""
+    return re.findall(r"[0-9A-Za-z가-힣]+", text or "")[:10]
+
+
+def _keyword_fetch(api_key, words, max_pages=2):
+    results, cursor = [], ""
+    for _ in range(max_pages):            # 결과가 아주 많으면 앞쪽 1,000개까지만 (호출 한도 보호)
+        params = {"keyword": ",".join(words)}
+        if cursor:
+            params["cursor"] = cursor
+        data = _get(api_key, "keyword-search", params)
+        results.extend(data.get("auction_item") or [])
+        cursor = data.get("next_cursor")
+        if not cursor:
+            break
+    remember_names(x.get("item_name") for x in results)
+    return results
+
+
+@dataclass
+class Found:
+    name: str
+    list_min: int
+    list_count: int
+
+
+def keyword_search(api_key, text):
+    """
+    이름 일부로 현재 매물 검색 → 아이템별로 묶어서 [Found] (매물 많은 순)
+    넥슨 규칙: 입력한 단어가 이름에 '단어 그대로' 모두 들어 있어야 찾아져요.
+      '숏 소드' → '배틀 숏 소드' O  /  '모험가 소드' → '모험가의 플루트 숏 소드' X
+    """
+    words = keyword_words(text)
+    if not words:
+        return []
+    rows = _cached(("keyword", tuple(words)), lambda: _keyword_fetch(api_key, words))
+    groups = {}
+    for x in rows:
+        g = groups.setdefault(x["item_name"], [])
+        g.append(x["auction_price_per_unit"])
+    found = [Found(n, min(p), len(p)) for n, p in groups.items()]
+    found.sort(key=lambda f: (-f.list_count, f.name))
+    return found
 
 
 # ============================== 가격 ==============================
