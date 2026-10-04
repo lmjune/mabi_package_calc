@@ -563,7 +563,8 @@ def default_meal_time():
 
 
 def menu_line(m):
-    return f"{menu_data.KIND_EMOJI.get(m['kind'], '🍽️')} {m['kind']} · {menu_data.PRICE_LABEL[m['price']]}" + \
+    kind = f"{m['kind']} · {m['name']}" if m.get("detail") else m["kind"]
+    return f"{menu_data.KIND_EMOJI.get(m['kind'], '🍽️')} {kind} · {menu_data.PRICE_LABEL[m['price']]}" + \
            (" · 🙋 혼밥 OK" if m["solo"] else "")
 
 
@@ -601,11 +602,11 @@ class MenuView(discord.ui.View):
                                  description="조건을 조금 풀어서 다시 해보세요.", color=MENU_COLOR)
         if decided_by:
             e = discord.Embed(title=f"✅ 오늘 {c['time']}은 결정!", color=0x3BA55C,
-                              description=f"## {self.current['name']}\n{menu_line(self.current)}")
+                              description=f"## {self.current['show']}\n{menu_line(self.current)}")
             e.set_footer(text=f"{decided_by}님이 결정했어요 · 다시 뽑기 {self.rolls - 1}회")
             return e
         e = discord.Embed(title=f"🍽️ 오늘 {c['time']} 메뉴는…", color=MENU_COLOR,
-                          description=f"## {self.current['name']}\n{menu_line(self.current)}")
+                          description=f"## {self.current['show']}\n{menu_line(self.current)}")
         tease = REROLL_TEASE.get(self.rolls - 1)
         footer = f"조건: {cond_text(c)}"
         if self.rolls > 1:
@@ -650,17 +651,17 @@ class MenuVoteView(discord.ui.View):
         return sum(1 for v in self.votes.values() if v == i)
 
     def _label(self, i):
-        return f"{self.NUM[i]} {self.options[i]['name'][:60]} ({self._count(i)})"
+        return f"{self.NUM[i]} {self.options[i]['show'][:60]} ({self._count(i)})"
 
     def embed(self, winner=None):
-        lines = [f"{self.NUM[i]} **{m['name']}** — {menu_line(m)}  `{self._count(i)}표`"
+        lines = [f"{self.NUM[i]} **{m['show']}** — {menu_line(m)}  `{self._count(i)}표`"
                  for i, m in enumerate(self.options)]
         if winner is None:
             e = discord.Embed(title=f"🗳️ 오늘 {self.cond['time']} 뭐 먹지? 투표!", color=MENU_COLOR,
                               description="\n".join(lines))
             e.set_footer(text=f"버튼으로 투표 (바꾸기 가능) · {self.owner.display_name}님이 🏁 마감하거나 시간이 지나면 끝나요")
         else:
-            e = discord.Embed(title=f"🎉 오늘 {self.cond['time']}은 {winner['name']}!", color=0x3BA55C,
+            e = discord.Embed(title=f"🎉 오늘 {self.cond['time']}은 {winner['show']}!", color=0x3BA55C,
                               description="\n".join(lines))
             e.set_footer(text=f"총 {len(self.votes)}명 투표")
         return e
