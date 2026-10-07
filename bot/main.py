@@ -29,6 +29,17 @@ from bot.card_image import compose                # noqa: E402
 log = logging.getLogger("mabi-bot")
 
 
+class _QuietAutocomplete(logging.Filter):
+    """자동완성 응답이 늦게 도착한 경우(사용자가 계속 타이핑 중 등)는 해가 없어서 로그에서 숨겨요"""
+
+    def filter(self, record):
+        if "autocomplete" in record.getMessage() and record.exc_info:
+            err = record.exc_info[1]
+            if isinstance(err, discord.HTTPException) and getattr(err, "code", None) in (10062, 40060):
+                return False
+        return True
+
+
 # ============================== 설정 읽기 ==============================
 def load_env():
     """.env 파일(KEY=VALUE)을 환경변수로 읽기"""
@@ -307,15 +318,20 @@ def _remaining(expire):
 
 
 async def option_search(name, cat, opt_text):
-    """현재 매물을 옵션 조건으로 걸러서 (embed, view)"""
-    conds = options.parse_conditions(opt_text)
+    """현재 매물을 옵션 조건으로 걸러서 (embed, view). 무거운 계산은 별도 스레드에서"""
     more = False
     if name:
         items = await run_blocking(auction.listing, NEXON_KEY, name)
-        category = cat or options.item_category(name) or (items[0].get("auction_item_category") if items else None)
     else:
         items, more = await run_blocking(auction.category_listing, NEXON_KEY, cat, 4)
-        category = cat
+    embed, link = await run_blocking(_option_result, name, cat, opt_text, items, more)
+    return embed, history_view(*link)
+
+
+def _option_result(name, cat, opt_text, items, more):
+    conds = options.parse_conditions(opt_text)
+    category = (cat or options.item_category(name) or (items[0].get("auction_item_category") if items else None)
+                if name else cat)
     notes = options.resolve(conds, category) if conds else []
     hits = options.filter_items(items, conds) if conds else [(it, []) for it in items]
     hits.sort(key=lambda x: x[0].get("auction_price_per_unit") or 0)
@@ -357,7 +373,7 @@ async def option_search(name, cat, opt_text):
     if skipped:
         foot = "거래내역 링크에 못 넣은 조건: " + ", ".join(skipped) + " · " + foot
     e.set_footer(text=foot[:2000])
-    return e, history_view(name, None if name else cat, reforge, erg)
+    return e, (name, None if name else cat, reforge, erg)
 
 
 async def find_item(text):
@@ -955,6 +971,8 @@ async def cmd_status(interaction: discord.Interaction):
 # ============================== 실행 ==============================
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for name in ("discord.app_commands.tree", "discord"):
+        logging.getLogger(name).addFilter(_QuietAutocomplete())
     missing = [k for k, v in {"DISCORD_TOKEN": TOKEN, "NEXON_API_KEY": NEXON_KEY,
                               "ALLOWED_GUILD_IDS": ALLOWED_GUILDS}.items() if not v]
     if missing:
