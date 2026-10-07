@@ -64,6 +64,7 @@ class Fact:
     kind: str = ""        # option_type
     name: str = ""        # 순수 옵션 이름 (세공 이름 등, 링크용)
     over: bool = False    # 한계돌파 표시
+    pct: float = None     # 원래 값 (조건 숫자에 %·초 같은 단위를 붙이면 이걸로 비교)
 
 
 def _first_num(s):
@@ -111,9 +112,16 @@ def parse_option(op):
         if out:
             return out
     if t == "무리아스 유물":
-        m = re.match(r"^(.*?)\s*(-?\d+(?:\.\d+)?)%\s*증가", v)
+        # 10단계: 레벨 = 현재값 ÷ 최대값 × 10
+        #   "… 5% 증가 (최대 5%)" → 10레벨 / "… 3.5초 증가 (최대 5초)" → 7레벨 / "… 2.7 증가 (최대 3)" → 9레벨
+        m = re.match(r"^(.*?)\s*(-?\d+(?:\.\d+)?)\s*(%|초|m|개)?\s*(증가|추가|감소)"
+                     r"(?:\s*\(최대\s*(-?\d+(?:\.\d+)?)\s*(?:%|초|m|개)?\))?", v)
         if m:
-            return [Fact(f"무리아스 유물 {m.group(1).strip()}", float(m.group(2)), f"유물: {v}", t, m.group(1).strip())]
+            name, cur, unit = m.group(1).strip(), float(m.group(2)), m.group(3) or ""
+            mx = float(m.group(5)) if m.group(5) else None
+            lv = round(cur / mx * 10) if mx else None
+            show = (f"유물: {name} {lv}레벨 ({cur:g}{unit} / 최대 {mx:g}{unit})" if lv is not None else f"유물: {v}")
+            return [Fact(f"무리아스 유물 {name}", lv if lv is not None else cur, show, t, name, pct=cur)]
     if t in ("아이템 색상", "색상"):
         rgb = [float(x) for x in NUM.findall(v)]
         if len(rgb) == 3:
@@ -157,6 +165,7 @@ class Cond:
     gte: float = None
     lte: float = None
     labels: list = field(default_factory=list)   # 해석된 꼬리표 (색인 기준)
+    pct: bool = False                            # 숫자에 %·초 단위를 붙이면 원래 값으로 비교
 
     def match_label(self, label):
         s = squash(label)
@@ -170,17 +179,19 @@ class Cond:
             return False
         if self.gte is None and self.lte is None:
             return True
-        if f.number is None:
+        n = f.pct if (self.pct and f.pct is not None) else f.number
+        if n is None:
             return False
-        return (self.gte is None or f.number >= self.gte) and (self.lte is None or f.number <= self.lte)
+        return (self.gte is None or n >= self.gte) and (self.lte is None or n <= self.lte)
 
     def range_text(self):
+        u = (re.search(r"\d\s*(%|초|m|개)", self.raw) or [None, ""])[1] if self.pct else ""
         if self.gte is not None and self.lte is not None:
-            return f" {self.gte:g}~{self.lte:g}"
+            return f" {self.gte:g}{u}~{self.lte:g}{u}"
         if self.gte is not None:
-            return f" ≥ {self.gte:g}"
+            return f" ≥ {self.gte:g}{u}"
         if self.lte is not None:
-            return f" ≤ {self.lte:g}"
+            return f" ≤ {self.lte:g}{u}"
         return ""
 
 
@@ -192,15 +203,18 @@ def parse_conditions(text):
             continue
         gte = lte = None
         s = part
-        m = re.search(r"(-?\d+(?:\.\d+)?)\s*[~\-]\s*(-?\d+(?:\.\d+)?)", s)
+        pct = False
+        m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:%|초|m|개)?\s*[~\-]\s*(-?\d+(?:\.\d+)?)\s*(%|초|m|개)?\s*$", s)
         if m:
             gte, lte = float(m.group(1)), float(m.group(2))
-            s = s[:m.start()] + s[m.end():]
+            pct = bool(re.search(r"\d\s*(%|초|m|개)", m.group(0)))
+            s = s[:m.start()]
         else:
-            m = re.search(r"(>=|<=|≥|≤)?\s*(-?\d+(?:\.\d+)?)\s*(이상|이하|↑|↓)?\s*$", s)
+            m = re.search(r"(>=|<=|≥|≤)?\s*(-?\d+(?:\.\d+)?)\s*(%|초|m|개)?\s*(이상|이하|↑|↓)?\s*$", s)
             if m:
                 n = float(m.group(2))
-                if m.group(1) in ("<=", "≤") or m.group(3) in ("이하", "↓"):
+                pct = bool(m.group(3))
+                if m.group(1) in ("<=", "≤") or m.group(4) in ("이하", "↓"):
                     lte = n
                 else:
                     gte = n
@@ -212,7 +226,7 @@ def parse_conditions(text):
             alts = ALIASES.get(key, []) + [key]
             words.append(list(dict.fromkeys(alts)))
         if words:
-            conds.append(Cond(part, words, gte, lte))
+            conds.append(Cond(part, words, gte, lte, pct=pct))
     return conds
 
 
