@@ -4,3 +4,6 @@ bot/.env
 __pycache__/
 *.pyc
 .venv/
+data/catalog_state.json
+data/option_inspect/
+*.tmp

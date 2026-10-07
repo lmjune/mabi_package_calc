@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 마비노기 길드 디스코드 봇
-  /득템운  /시세  /합산  /패키지  /스팀할인  /메뉴  /봇상태
+  /득템운  /시세  /거래내역  /합산  /패키지  /스팀할인  /메뉴  /봇상태
 
 실행:  python -m bot.main      (저장소 맨 위 폴더에서)
 필요한 환경변수(.env): DISCORD_TOKEN, NEXON_API_KEY, ALLOWED_GUILD_IDS
@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 import settings                                   # noqa: E402
 from core import auction, steam, tarot            # noqa: E402
 from core import menus as menu_data               # noqa: E402
+from core import mabizip                          # noqa: E402
 from bot.card_image import compose                # noqa: E402
 
 log = logging.getLogger("mabi-bot")
@@ -248,12 +249,20 @@ def quote_embed(q, note=""):
     return e
 
 
-class PickItemView(discord.ui.View):
-    """부분 검색 결과가 여러 개일 때 고르는 메뉴"""
+def history_view(item_name=None, category=None):
+    """mabi.zip 거래내역 링크 버튼"""
+    v = discord.ui.View()
+    v.add_item(discord.ui.Button(label="📈 거래내역 보기 (mabi.zip)", style=discord.ButtonStyle.link,
+                                 url=mabizip.history_url(item_name=item_name, category=category)))
+    return v
 
-    def __init__(self, found, owner_id):
+
+class PickItemView(discord.ui.View):
+    """부분 검색 결과가 여러 개일 때 고르는 메뉴. mode='quote' 시세 / 'history' 거래내역 링크"""
+
+    def __init__(self, found, owner_id, mode="quote", category=None):
         super().__init__(timeout=300)
-        self.owner_id = owner_id
+        self.owner_id, self.mode, self.category = owner_id, mode, category
         options = []
         for f in found[:25]:
             desc = (f"현재 최저 {f.list_min:,}골드 · 매물 {f.list_count}건" if f.list_min is not None
@@ -270,6 +279,12 @@ class PickItemView(discord.ui.View):
                                                     ephemeral=True)
             return
         name = self.select.values[0]
+        if self.mode == "history":
+            remember_item(name)
+            self.stop()
+            await interaction.response.edit_message(embed=history_embed(name, self.category),
+                                                    view=history_view(name, self.category))
+            return
         await interaction.response.defer()
         try:
             q = await run_blocking(auction.quote, NEXON_KEY, name)
@@ -278,7 +293,7 @@ class PickItemView(discord.ui.View):
             return
         remember_item(name)
         self.stop()
-        await interaction.edit_original_response(embed=quote_embed(q), view=None)
+        await interaction.edit_original_response(embed=quote_embed(q), view=history_view(name))
 
 
 def candidates_embed(text, found, partial_note):
@@ -304,7 +319,7 @@ async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보�
             q = await run_blocking(auction.quote, NEXON_KEY, text)
             if q.trade_min is not None or q.list_min is not None:
                 remember_item(text)
-                await interaction.followup.send(embed=quote_embed(q))
+                await interaction.followup.send(embed=quote_embed(q), view=history_view(text))
                 return
 
         # 2) 넥슨 키워드 검색 (현재 매물에서 이름 일부로 찾기, 호출 1번)
@@ -323,7 +338,7 @@ async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보�
             q = await run_blocking(auction.quote, NEXON_KEY, name)
             remember_item(name)
             hint = "" if name == text else f"'{text}' → **{name}** 으로 찾았어요"
-            await interaction.followup.send(embed=quote_embed(q, hint))
+            await interaction.followup.send(embed=quote_embed(q, hint), view=history_view(name))
             return
 
         if found:
@@ -343,7 +358,70 @@ async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보�
             "• 지금 매물이 하나도 없는 아이템은 정확한 전체 이름으로만 찾을 수 있어요.")
         return
     remember_item(q.item_name)
-    await interaction.followup.send(embed=quote_embed(q))
+    await interaction.followup.send(embed=quote_embed(q), view=history_view(q.item_name))
+
+
+# ============================== /거래내역 ==============================
+def history_embed(item_name=None, category=None, note=""):
+    cond = []
+    if item_name:
+        cond.append(f"아이템: **{item_name}**")
+    if category:
+        cond.append(f"카테고리: **{category}**")
+    e = discord.Embed(title="📈 경매장 거래내역", color=GOLD_COLOR,
+                      description="\n".join(cond + ([note] if note else [])))
+    e.set_footer(text="거래내역은 mabi.zip에서 확인해요 · 버튼을 눌러 열어보세요")
+    return e
+
+
+async def category_autocomplete(interaction, current: str):
+    return [app_commands.Choice(name=c, value=c) for c in mabizip.category_matches(current)]
+
+
+@tree.command(name="거래내역", description="경매장 과거 거래내역을 mabi.zip에서 열어요 (아이템 이름·카테고리)")
+@app_commands.describe(아이템="아이템 이름 (일부만 넣어도 찾아줘요)", 카테고리="경매장 카테고리 (예: 활, 인챈트 스크롤)",
+                       나만보기="결과를 나에게만 보여주기")
+@app_commands.autocomplete(아이템=item_autocomplete, 카테고리=category_autocomplete)
+async def cmd_history(interaction: discord.Interaction, 아이템: str = "", 카테고리: str = "", 나만보기: bool = False):
+    text, cat = 아이템.strip(), 카테고리.strip() or None
+    if cat and cat not in mabizip.CATEGORIES:
+        hits = mabizip.category_matches(cat, 5)
+        await interaction.response.send_message(
+            f"'{cat}' 카테고리가 없어요." + (f" 혹시: {', '.join(hits)}" if hits else ""), ephemeral=True)
+        return
+    if not text and not cat:
+        await interaction.response.send_message("아이템 이름이나 카테고리 중 하나는 넣어주세요.", ephemeral=True)
+        return
+    if not text or text in auction.KNOWN_NAMES or text in known_items():
+        if text:
+            remember_item(text)
+        await interaction.response.send_message(embed=history_embed(text or None, cat),
+                                                view=history_view(text or None, cat), ephemeral=나만보기)
+        return
+
+    # 정확한 이름 찾기 (mabi.zip 은 정확한 이름이어야 검색돼요)
+    await interaction.response.defer(thinking=True, ephemeral=나만보기)
+    try:
+        found = await run_blocking(auction.smart_search, NEXON_KEY, text)
+    except Exception as e:
+        await interaction.followup.send(error_text(e))
+        return
+    exact = next((f for f in found if f.name == text), None)
+    if exact or len(found) == 1:
+        name = (exact or found[0]).name
+        remember_item(name)
+        note = "" if name == text else f"'{text}' → **{name}** 으로 찾았어요"
+        await interaction.followup.send(embed=history_embed(name, cat, note), view=history_view(name, cat))
+        return
+    if found:
+        await interaction.followup.send(
+            embed=candidates_embed(text, found, "정확한 이름이어야 mabi.zip에서 검색돼요"),
+            view=PickItemView(found, interaction.user.id, mode="history", category=cat))
+        return
+    await interaction.followup.send(
+        embed=history_embed(text, cat, "⚠️ 정확한 이름을 찾지 못해서 입력한 그대로 연결했어요. "
+                                       "결과가 없으면 mabi.zip에서 이름을 다시 골라주세요."),
+        view=history_view(text, cat))
 
 
 # ============================== /합산 ==============================
