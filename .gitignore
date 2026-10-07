@@ -7,3 +7,4 @@ __pycache__/
 data/catalog_state.json
 data/option_inspect/
 *.tmp
+data/option_catalog.json

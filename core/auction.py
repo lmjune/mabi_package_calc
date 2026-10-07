@@ -254,6 +254,14 @@ def smart_search(api_key, text, max_probes=3):
     if text.strip() in merged:                      # 정확한 이름이면 더 찾을 필요 없음
         return list(merged.values())
 
+    local = local_matches(text, 50)                  # 아는 이름(옵션 사전 색인 포함)에 있으면 추가 호출 없이
+    if local:
+        for n in local:
+            merged.setdefault(n, Found(n, None, 0))
+        found = list(merged.values())
+        found.sort(key=lambda f: (f.list_min is None, -f.list_count, f.name))
+        return found
+
     if len(target) >= 2:
         probes = []
         for p in [target[-2:], target[-3:], *sorted(words, key=len), target[:2]]:
@@ -270,6 +278,29 @@ def smart_search(api_key, text, max_probes=3):
     found = list(merged.values())
     found.sort(key=lambda f: (f.list_min is None, -f.list_count, f.name))
     return found
+
+
+def category_listing(api_key, category, max_pages=4):
+    """카테고리 현재 매물 (앞쪽 max_pages 페이지 = 최대 500×N개, 공유 캐시)"""
+    def load():
+        results, cursor = [], ""
+        for _ in range(max_pages):
+            params = {"auction_item_category": category}
+            if cursor:
+                params["cursor"] = cursor
+            data = _get(api_key, "list", params)
+            results.extend(data.get("auction_item") or [])
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
+        remember_names(x.get("item_name") for x in results)
+        return results, bool(cursor)          # (매물, 더 남았는지)
+    return _cached(("category", category, max_pages), load)
+
+
+def full_listing(api_key, item_name):
+    """아이템 현재 매물 (옵션 포함 원본)"""
+    return listing(api_key, item_name)
 
 
 # ============================== 가격 ==============================

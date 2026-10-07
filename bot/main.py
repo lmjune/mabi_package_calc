@@ -9,6 +9,7 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ import settings                                   # noqa: E402
 from core import auction, steam, tarot            # noqa: E402
 from core import menus as menu_data               # noqa: E402
 from core import mabizip                          # noqa: E402
+from core import options                          # noqa: E402
 from bot.card_image import compose                # noqa: E402
 
 log = logging.getLogger("mabi-bot")
@@ -213,6 +215,10 @@ async def cmd_fortune(interaction: discord.Interaction):
 # ============================== /시세 ==============================
 _recent_items = []
 
+# 옵션 사전 색인에 있는 아이템 이름을 미리 넣어둬요 (매물이 없을 때도 이름 검색·자동완성 가능)
+for _names in options.load_index().get("items", {}).values():
+    auction.remember_names(_names)
+
 
 def remember_item(name):
     if name in _recent_items:
@@ -231,12 +237,42 @@ def known_items():
     return names
 
 
+def _ns(interaction, key):
+    try:
+        return (getattr(interaction.namespace, key, None) or "").strip()
+    except Exception:
+        return ""
+
+
 async def item_autocomplete(interaction, current: str):
-    # API 호출 없이: 최근 조회 + 패키지 구성품 + 지금까지 봇이 본 아이템 이름
+    # API 호출 없이: 최근 조회 + 패키지 구성품 + 옵션 사전 + 봇이 본 이름
     q = current.replace(" ", "")
+    cat = _ns(interaction, "카테고리")
+    in_cat = set(options.load_index().get("items", {}).get(cat, [])) if cat else None
     base = [n for n in known_items() if q in n.replace(" ", "")]
-    more = [n for n in auction.local_matches(current, 50) if n not in base] if q else []
-    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in (base + more)[:25]]
+    more = [n for n in auction.local_matches(current, 200) if n not in base] if q else []
+    names = [n for n in base + more if in_cat is None or n in in_cat]
+    return [app_commands.Choice(name=n[:100], value=n[:100]) for n in names[:25]]
+
+
+async def category_autocomplete(interaction, current: str):
+    return [app_commands.Choice(name=c, value=c) for c in mabizip.category_matches(current)]
+
+
+async def option_autocomplete(interaction, current: str):
+    """옵션 칸: 마지막 조건 조각에 맞는 옵션 이름 추천 (앞 조건·숫자는 그대로 둠)"""
+    cat = _ns(interaction, "카테고리") or options.item_category(_ns(interaction, "아이템")) or None
+    head, _, last = current.rpartition(",")
+    m = re.search(r"\s*((?:-?\d+(?:\.\d+)?\s*[~\-]\s*)?-?\d+(?:\.\d+)?\s*(?:이상|이하)?)\s*$", last)
+    num = (" " + m.group(1).strip()) if m else ""
+    prefix = (head.strip() + ", ") if head.strip() else ""
+    out = []
+    for label in options.suggest_labels(last, cat, 25):
+        value = f"{prefix}{label}{num}"
+        if len(value) > 100:
+            value = f"{label}{num}"[:100]
+        out.append(app_commands.Choice(name=value[:100], value=value))
+    return out
 
 
 def quote_embed(q, note=""):
@@ -245,59 +281,145 @@ def quote_embed(q, note=""):
                 value=f"**{q.trade_min:,}** 골드\n({q.trade_count}건)" if q.trade_min is not None else "거래 없음")
     e.add_field(name="현재 매물 최저가",
                 value=f"**{q.list_min:,}** 골드\n({q.list_count}건)" if q.list_min is not None else "매물 없음")
-    e.set_footer(text="게임보다 평균 10분 늦게 반영돼요")
+    e.set_footer(text="게임보다 평균 10분 늦게 반영돼요 · 옵션으로 찾으려면 옵션 칸을 채워보세요")
     return e
 
 
-def history_view(item_name=None, category=None):
+def history_view(item_name=None, category=None, reforge=None, erg=None):
     """mabi.zip 거래내역 링크 버튼"""
     v = discord.ui.View()
     v.add_item(discord.ui.Button(label="📈 거래내역 보기 (mabi.zip)", style=discord.ButtonStyle.link,
-                                 url=mabizip.history_url(item_name=item_name, category=category)))
+                                 url=mabizip.history_url(item_name=item_name, category=category,
+                                                         reforge=reforge, erg_type=erg)))
     return v
 
 
-class PickItemView(discord.ui.View):
-    """부분 검색 결과가 여러 개일 때 고르는 메뉴. mode='quote' 시세 / 'history' 거래내역 링크"""
+def _remaining(expire):
+    try:
+        end = tarot.dt.datetime.fromisoformat(str(expire).replace("Z", "+00:00"))
+    except Exception:
+        return ""
+    sec = (end - tarot.dt.datetime.now(tarot.dt.timezone.utc)).total_seconds()
+    if sec <= 0:
+        return "곧 종료"
+    d, h, m = int(sec // 86400), int(sec % 86400 // 3600), int(sec % 3600 // 60)
+    return f"{d}일 {h}시간" if d else (f"{h}시간" if h else f"{m}분")
 
-    def __init__(self, found, owner_id, mode="quote", category=None):
+
+async def option_search(name, cat, opt_text):
+    """현재 매물을 옵션 조건으로 걸러서 (embed, view)"""
+    conds = options.parse_conditions(opt_text)
+    more = False
+    if name:
+        items = await run_blocking(auction.listing, NEXON_KEY, name)
+        category = cat or options.item_category(name) or (items[0].get("auction_item_category") if items else None)
+    else:
+        items, more = await run_blocking(auction.category_listing, NEXON_KEY, cat, 4)
+        category = cat
+    notes = options.resolve(conds, category) if conds else []
+    hits = options.filter_items(items, conds) if conds else [(it, []) for it in items]
+    hits.sort(key=lambda x: x[0].get("auction_price_per_unit") or 0)
+
+    lines = []
+    if notes:
+        lines.append("**🔎 이렇게 이해했어요**\n" + "\n".join(f"• {n}" for n in notes))
+    scope = f"전체 매물 {len(items):,}개" + (" (카테고리 앞쪽 2,000개만 확인)" if more else "")
+    lines.append(f"\n조건에 맞는 매물 **{len(hits):,}개** / {scope}" if conds else f"\n{scope} · 싼 순")
+    for i, (it, hit) in enumerate(hits[:10], 1):
+        nm = it.get("item_display_name") or it.get("item_name")
+        price = it.get("auction_price_per_unit") or 0
+        cnt = it.get("item_count") or 1
+        row = f"`{i}.` **{nm}** — **{auction.kgold(price)}** 골드" + (f" ×{cnt}" if cnt > 1 else "")
+        left = _remaining(it.get("date_auction_expire"))
+        if left:
+            row += f" · ⏳{left}"
+        shows = list(dict.fromkeys(f.show for f in hit))
+        if shows:
+            row += "\n　└ " + " · ".join(shows)[:200]
+        lines.append(row)
+    if conds and not hits and items:
+        counts = options.per_condition_counts(items, conds)
+        lines.append("\n지금은 조건을 모두 만족하는 매물이 없어요. 조건 하나씩만 보면:")
+        lines += [f"• `{c.raw}` 만족: {n}개" for c, n in zip(conds, counts)]
+    if not items:
+        lines.append("\n지금 이 아이템/카테고리의 매물이 없어요. 과거 거래는 아래 버튼으로 확인해 보세요.")
+
+    desc = ""
+    for ln in lines:
+        if len(desc) + len(ln) + 1 > 3900:
+            desc += "\n…"
+            break
+        desc += ln + "\n"
+    e = discord.Embed(title=f"🔍 {name or cat}" + (" · 옵션 검색" if conds else ""), color=GOLD_COLOR,
+                      description=desc.strip())
+    reforge, erg, skipped = options.link_terms(conds, category)
+    foot = "게임보다 평균 10분 늦게 반영돼요"
+    if skipped:
+        foot = "거래내역 링크에 못 넣은 조건: " + ", ".join(skipped) + " · " + foot
+    e.set_footer(text=foot[:2000])
+    return e, history_view(name, None if name else cat, reforge, erg)
+
+
+async def find_item(text):
+    """이름 찾기 → ('name', 이름, 안내) / ('pick', 후보들, 안내) / ('none', None, '')"""
+    if text in auction.KNOWN_NAMES or text in known_items():
+        return "name", text, ""
+    found = await run_blocking(auction.smart_search, NEXON_KEY, text)
+    note = "현재 경매장에 매물이 있는 아이템만 찾을 수 있어요"
+    if not found:
+        found = [auction.Found(n, None, 0) for n in auction.local_matches(text)]
+        note = "봇이 아는 이름에서 찾았어요"
+    exact = next((f for f in found if f.name == text), None)
+    if exact or len(found) == 1:
+        name = (exact or found[0]).name
+        return "name", name, ("" if name == text else f"'{text}' → **{name}** 으로 찾았어요")
+    if found:
+        return "pick", found, note
+    return "none", None, ""
+
+
+class PickItemView(discord.ui.View):
+    """이름 후보가 여러 개일 때 고르는 메뉴. mode: quote(시세) / history(거래내역) / options(옵션 검색)"""
+
+    def __init__(self, found, owner_id, mode="quote", category=None, opt_text=""):
         super().__init__(timeout=300)
-        self.owner_id, self.mode, self.category = owner_id, mode, category
-        options = []
+        self.owner_id, self.mode, self.category, self.opt_text = owner_id, mode, category, opt_text
+        opts = []
         for f in found[:25]:
             desc = (f"현재 최저 {f.list_min:,}골드 · 매물 {f.list_count}건" if f.list_min is not None
-                    else "최근 조회한 아이템")
-            options.append(discord.SelectOption(label=f.name[:100], value=f.name[:100], description=desc[:100]))
-        sel = discord.ui.Select(placeholder="어떤 아이템인가요?", options=options)
+                    else "아는 이름 (지금 매물 정보 없음)")
+            opts.append(discord.SelectOption(label=f.name[:100], value=f.name[:100], description=desc[:100]))
+        sel = discord.ui.Select(placeholder="어떤 아이템인가요?", options=opts)
         sel.callback = self._picked
         self.add_item(sel)
         self.select = sel
 
     async def _picked(self, interaction: discord.Interaction):
         if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("검색한 사람만 고를 수 있어요. `/시세`로 직접 찾아보세요!",
-                                                    ephemeral=True)
+            await interaction.response.send_message("검색한 사람만 고를 수 있어요. 직접 검색해 보세요!", ephemeral=True)
             return
         name = self.select.values[0]
+        remember_item(name)
+        self.stop()
         if self.mode == "history":
-            remember_item(name)
-            self.stop()
-            await interaction.response.edit_message(embed=history_embed(name, self.category),
-                                                    view=history_view(name, self.category))
+            embed, view = history_result(name, self.category, self.opt_text)
+            await interaction.response.edit_message(embed=embed, view=view)
             return
         await interaction.response.defer()
         try:
-            q = await run_blocking(auction.quote, NEXON_KEY, name)
+            if self.mode == "options":
+                embed, view = await option_search(name, self.category, self.opt_text)
+            else:
+                q = await run_blocking(auction.quote, NEXON_KEY, name)
+                embed, view = quote_embed(q), history_view(name)
         except Exception as e:
             await interaction.edit_original_response(content=error_text(e), embed=None, view=None)
             return
-        remember_item(name)
-        self.stop()
-        await interaction.edit_original_response(embed=quote_embed(q), view=history_view(name))
+        await interaction.edit_original_response(embed=embed, view=view)
 
 
 def candidates_embed(text, found, partial_note):
-    lines = [f"• **{f.name}** — " + (f"{f.list_min:,}골드 ({f.list_count}건)" if f.list_min is not None else "최근 조회")
+    lines = [f"• **{f.name}** — " + (f"{f.list_min:,}골드 ({f.list_count}건)" if f.list_min is not None else "아는 이름")
              for f in found[:15]]
     more = f"\n… 외 {len(found) - 15}개" if len(found) > 15 else ""
     e = discord.Embed(title=f"🔍 '{text}' 검색 결과 {len(found)}개", color=GOLD_COLOR,
@@ -306,48 +428,54 @@ def candidates_embed(text, found, partial_note):
     return e
 
 
-@tree.command(name="시세", description="아이템 경매장 최저가 (이름 일부만 넣어도 찾아줘요)")
-@app_commands.describe(아이템="아이템 이름 (전체 또는 일부. 예: 기억의 보석 / 개조석 7단계)",
-                       나만보기="결과를 나에게만 보여주기")
-@app_commands.autocomplete(아이템=item_autocomplete)
-async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보기: bool = False):
+def bad_category(cat):
+    if cat and cat not in mabizip.CATEGORIES:
+        hits = mabizip.category_matches(cat, 5)
+        return f"'{cat}' 카테고리가 없어요." + (f" 혹시: {', '.join(hits)}" if hits else "")
+    return None
+
+
+@tree.command(name="시세", description="경매장 최저가 · 옵션 조건 검색 (이름 일부만 넣어도 찾아줘요)")
+@app_commands.describe(
+    아이템="아이템 이름 (전체 또는 일부. 예: 나이트브링어 프레데터)",
+    카테고리="카테고리 전체에서 찾기 (예: 활, 에코스톤, 염색 앰플)",
+    옵션="옵션 조건, 쉼표로 여러 개 (예: 최공 20, 사거리 18~20, 광포한 / 지력 90 / R 250 이상)",
+    나만보기="결과를 나에게만 보여주기")
+@app_commands.autocomplete(아이템=item_autocomplete, 카테고리=category_autocomplete, 옵션=option_autocomplete)
+async def cmd_quote(interaction: discord.Interaction, 아이템: str = "", 카테고리: str = "", 옵션: str = "",
+                    나만보기: bool = False):
+    text, cat, opt = 아이템.strip(), 카테고리.strip() or None, 옵션.strip()
+    msg = bad_category(cat) or (None if (text or cat) else "아이템 이름이나 카테고리 중 하나는 넣어주세요.")
+    if msg:
+        await interaction.response.send_message(msg, ephemeral=True)
+        return
     await interaction.response.defer(thinking=True, ephemeral=나만보기)
-    text = 아이템.strip()
     try:
-        # 1) 이미 아는 정확한 이름이면 바로 시세
-        if text in auction.KNOWN_NAMES or text in known_items():
-            q = await run_blocking(auction.quote, NEXON_KEY, text)
-            if q.trade_min is not None or q.list_min is not None:
-                remember_item(text)
-                await interaction.followup.send(embed=quote_embed(q), view=history_view(text))
-                return
-
-        # 2) 넥슨 키워드 검색 (현재 매물에서 이름 일부로 찾기, 호출 1번)
-        found = await run_blocking(auction.smart_search, NEXON_KEY, text)
-        note = "현재 경매장에 매물이 있는 아이템만 찾을 수 있어요"
-
-        # 3) 그래도 없으면 봇이 지금까지 본 이름에서 공백 무시하고 찾기 (호출 없음)
-        if not found:
-            local = auction.local_matches(text)
-            found = [auction.Found(n, None, 0) for n in local]
-            note = "봇이 전에 조회한 이름에서 찾았어요"
-
-        exact = next((f for f in found if f.name == text), None)
-        if exact or len(found) == 1:
-            name = (exact or found[0]).name
-            q = await run_blocking(auction.quote, NEXON_KEY, name)
-            remember_item(name)
-            hint = "" if name == text else f"'{text}' → **{name}** 으로 찾았어요"
-            await interaction.followup.send(embed=quote_embed(q, hint), view=history_view(name))
+        # 옵션 검색 / 카테고리 검색
+        if opt or (cat and not text):
+            name = None
+            if text:
+                kind, val, hint = await find_item(text)
+                if kind == "pick":
+                    await interaction.followup.send(
+                        embed=candidates_embed(text, val, hint),
+                        view=PickItemView(val, interaction.user.id, mode="options", category=cat, opt_text=opt))
+                    return
+                name = val if kind == "name" else text
+            embed, view = await option_search(name, cat, opt)
+            await interaction.followup.send(embed=embed, view=view)
+            if name:
+                remember_item(name)
             return
 
-        if found:
-            await interaction.followup.send(embed=candidates_embed(text, found, note),
-                                            view=PickItemView(found, interaction.user.id))
+        # 이름만: 최저가 요약
+        kind, val, hint = await find_item(text)
+        if kind == "pick":
+            await interaction.followup.send(embed=candidates_embed(text, val, hint),
+                                            view=PickItemView(val, interaction.user.id))
             return
-
-        # 4) 마지막으로 입력 그대로 조회 (매물은 없고 거래 내역만 있는 경우)
-        q = await run_blocking(auction.quote, NEXON_KEY, text)
+        name = val if kind == "name" else text
+        q = await run_blocking(auction.quote, NEXON_KEY, name)
     except Exception as e:
         await interaction.followup.send(error_text(e))
         return
@@ -355,73 +483,73 @@ async def cmd_quote(interaction: discord.Interaction, 아이템: str, 나만보�
         await interaction.followup.send(
             f"🔍 **{text}** 을(를) 찾지 못했어요.\n"
             "• 오타가 없는지 확인해 주세요. 띄어쓰기는 달라도 괜찮아요.\n"
-            "• 지금 매물이 하나도 없는 아이템은 정확한 전체 이름으로만 찾을 수 있어요.")
+            "• 지금 매물이 하나도 없는 아이템은 정확한 전체 이름으로만 찾을 수 있어요.",
+            view=history_view(name))
         return
     remember_item(q.item_name)
-    await interaction.followup.send(embed=quote_embed(q), view=history_view(q.item_name))
+    await interaction.followup.send(embed=quote_embed(q, hint), view=history_view(q.item_name))
 
 
 # ============================== /거래내역 ==============================
-def history_embed(item_name=None, category=None, note=""):
-    cond = []
+def history_result(item_name=None, category=None, opt_text="", note=""):
+    """거래내역 링크 (embed, view). 옵션은 링크에 넣을 수 있는 것만"""
+    conds = options.parse_conditions(opt_text)
+    cat_for_opts = category or (options.item_category(item_name) if item_name else None)
+    notes = options.resolve(conds, cat_for_opts) if conds else []
+    reforge, erg, skipped = options.link_terms(conds, cat_for_opts)
+    lines = []
     if item_name:
-        cond.append(f"아이템: **{item_name}**")
+        lines.append(f"아이템: **{item_name}**")
     if category:
-        cond.append(f"카테고리: **{category}**")
-    e = discord.Embed(title="📈 경매장 거래내역", color=GOLD_COLOR,
-                      description="\n".join(cond + ([note] if note else [])))
-    e.set_footer(text="거래내역은 mabi.zip에서 확인해요 · 버튼을 눌러 열어보세요")
-    return e
+        lines.append(f"카테고리: **{category}**")
+    if note:
+        lines.append(note)
+    if notes:
+        lines.append("\n**🔎 옵션 해석**\n" + "\n".join(f"• {n}" for n in notes))
+    if skipped:
+        lines.append("\n⚠️ 링크에 못 넣은 조건 (mabi.zip에서 직접 선택): " + ", ".join(skipped))
+    e = discord.Embed(title="📈 경매장 거래내역", color=GOLD_COLOR, description="\n".join(lines)[:3900])
+    e.set_footer(text="거래내역은 mabi.zip에서 확인해요 · 지금 링크에 넣을 수 있는 옵션: 세공 옵션, 에르그 등급")
+    return e, history_view(item_name, category, reforge, erg)
 
 
-async def category_autocomplete(interaction, current: str):
-    return [app_commands.Choice(name=c, value=c) for c in mabizip.category_matches(current)]
-
-
-@tree.command(name="거래내역", description="경매장 과거 거래내역을 mabi.zip에서 열어요 (아이템 이름·카테고리)")
+@tree.command(name="거래내역", description="경매장 과거 거래내역을 mabi.zip에서 열어요 (아이템·카테고리·세공 옵션)")
 @app_commands.describe(아이템="아이템 이름 (일부만 넣어도 찾아줘요)", 카테고리="경매장 카테고리 (예: 활, 인챈트 스크롤)",
-                       나만보기="결과를 나에게만 보여주기")
-@app_commands.autocomplete(아이템=item_autocomplete, 카테고리=category_autocomplete)
-async def cmd_history(interaction: discord.Interaction, 아이템: str = "", 카테고리: str = "", 나만보기: bool = False):
-    text, cat = 아이템.strip(), 카테고리.strip() or None
-    if cat and cat not in mabizip.CATEGORIES:
-        hits = mabizip.category_matches(cat, 5)
-        await interaction.response.send_message(
-            f"'{cat}' 카테고리가 없어요." + (f" 혹시: {', '.join(hits)}" if hits else ""), ephemeral=True)
-        return
-    if not text and not cat:
-        await interaction.response.send_message("아이템 이름이나 카테고리 중 하나는 넣어주세요.", ephemeral=True)
+                       옵션="세공 옵션 조건 (예: 최공 20, 사거리 18~20)", 나만보기="결과를 나에게만 보여주기")
+@app_commands.autocomplete(아이템=item_autocomplete, 카테고리=category_autocomplete, 옵션=option_autocomplete)
+async def cmd_history(interaction: discord.Interaction, 아이템: str = "", 카테고리: str = "", 옵션: str = "",
+                      나만보기: bool = False):
+    text, cat, opt = 아이템.strip(), 카테고리.strip() or None, 옵션.strip()
+    msg = bad_category(cat) or (None if (text or cat) else "아이템 이름이나 카테고리 중 하나는 넣어주세요.")
+    if msg:
+        await interaction.response.send_message(msg, ephemeral=True)
         return
     if not text or text in auction.KNOWN_NAMES or text in known_items():
         if text:
             remember_item(text)
-        await interaction.response.send_message(embed=history_embed(text or None, cat),
-                                                view=history_view(text or None, cat), ephemeral=나만보기)
+        embed, view = history_result(text or None, cat, opt)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=나만보기)
         return
 
     # 정확한 이름 찾기 (mabi.zip 은 정확한 이름이어야 검색돼요)
     await interaction.response.defer(thinking=True, ephemeral=나만보기)
     try:
-        found = await run_blocking(auction.smart_search, NEXON_KEY, text)
+        kind, val, hint = await find_item(text)
     except Exception as e:
         await interaction.followup.send(error_text(e))
         return
-    exact = next((f for f in found if f.name == text), None)
-    if exact or len(found) == 1:
-        name = (exact or found[0]).name
-        remember_item(name)
-        note = "" if name == text else f"'{text}' → **{name}** 으로 찾았어요"
-        await interaction.followup.send(embed=history_embed(name, cat, note), view=history_view(name, cat))
-        return
-    if found:
+    if kind == "pick":
         await interaction.followup.send(
-            embed=candidates_embed(text, found, "정확한 이름이어야 mabi.zip에서 검색돼요"),
-            view=PickItemView(found, interaction.user.id, mode="history", category=cat))
+            embed=candidates_embed(text, val, "정확한 이름이어야 mabi.zip에서 검색돼요"),
+            view=PickItemView(val, interaction.user.id, mode="history", category=cat, opt_text=opt))
         return
-    await interaction.followup.send(
-        embed=history_embed(text, cat, "⚠️ 정확한 이름을 찾지 못해서 입력한 그대로 연결했어요. "
-                                       "결과가 없으면 mabi.zip에서 이름을 다시 골라주세요."),
-        view=history_view(text, cat))
+    if kind == "name":
+        remember_item(val)
+        embed, view = history_result(val, cat, opt, hint)
+    else:
+        embed, view = history_result(text, cat, opt, "⚠️ 정확한 이름을 찾지 못해서 입력한 그대로 연결했어요. "
+                                                   "결과가 없으면 mabi.zip에서 이름을 다시 골라주세요.")
+    await interaction.followup.send(embed=embed, view=view)
 
 
 # ============================== /합산 ==============================

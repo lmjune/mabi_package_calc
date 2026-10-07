@@ -17,7 +17,8 @@ API 키: .env 의 NEXON_COLLECT_API_KEY (없으면 NEXON_API_KEY)
   - 연속 --stale 페이지(기본 3) 동안 새 옵션 틀이 없고 새 아이템 이름도 거의 없을 때
   - 또는 --max-pages(기본 20페이지 = 1만 개)에 닿았을 때
 
-결과: data/option_catalog.json  ← GitHub 에 올리면 봇·웹이 사용
+결과: data/option_catalog.json (원본, PC 보관) + data/option_index.json (봇용 색인, GitHub 에 올리기)
+색인만 다시 만들기: python tools/build_option_catalog.py --index-only
 """
 import argparse
 import datetime as dt
@@ -33,6 +34,7 @@ import requests
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from core.mabizip import CATEGORIES  # noqa: E402
+from core.options import build_index, INDEX_PATH  # noqa: E402
 
 URL = "https://open.api.nexon.com/mabinogi/v1/auction/list"
 CATALOG = ROOT / "data" / "option_catalog.json"
@@ -165,7 +167,13 @@ def main():
     ap.add_argument("--interval", type=float, default=0.5, help="호출 간격(초)")
     ap.add_argument("--no-wait", action="store_true", help="상한에 닿으면 기다리지 않고 종료")
     ap.add_argument("--restart", action="store_true", help="진행 상황을 지우고 처음부터 다시 훑기")
+    ap.add_argument("--index-only", action="store_true", help="수집 없이 option_catalog.json 으로 색인만 다시 만들기")
     args = ap.parse_args()
+    if args.index_only:
+        INDEX_PATH.write_text(json.dumps(build_index(load(CATALOG, {"categories": {}})), ensure_ascii=False,
+                                         separators=(",", ":")), encoding="utf-8")
+        print(f"색인 생성: {INDEX_PATH}")
+        return
 
     cats = args.categories or CATEGORIES
     bad = [c for c in cats if c not in CATEGORIES]
@@ -218,8 +226,11 @@ def main():
     n_t = sum(len(ts) for c in catalog["categories"].values()
               for subs in c.get("options", {}).values() for ts in subs.values())
     n_n = sum(len(c.get("item_names", {})) for c in catalog["categories"].values())
-    print(f"\n✅ 완료! 옵션 틀 {n_t:,}개 · 아이템 이름 {n_n:,}개 → {CATALOG}")
-    print("   data/option_catalog.json 을 GitHub 에 올려주세요. (catalog_state.json 은 안 올려도 돼요)")
+    INDEX_PATH.write_text(json.dumps(build_index(catalog), ensure_ascii=False, separators=(",", ":")),
+                          encoding="utf-8")
+    print(f"\n✅ 완료! 옵션 틀 {n_t:,}개 · 아이템 이름 {n_n:,}개")
+    print(f"   봇용 색인: {INDEX_PATH}  ← 이 파일을 GitHub 에 올려주세요")
+    print("   (option_catalog.json 은 다음 수집 때 이어서 쓰는 원본이라 PC에만 두면 돼요)")
 
 
 if __name__ == "__main__":
