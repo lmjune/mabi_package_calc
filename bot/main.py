@@ -317,15 +317,44 @@ def _remaining(expire):
     return f"{d}일 {h}시간" if d else (f"{h}시간" if h else f"{m}분")
 
 
-async def option_search(name, cat, opt_text):
+CAT_STEP = 4          # 카테고리 검색: 한 번에 보는 페이지 수 (4페이지 = 2,000개)
+CAT_MAX = 20          # 최대 20페이지 (1만 개)
+
+
+class OptionSearchView(discord.ui.View):
+    """옵션 검색 결과: 거래내역 링크 + (카테고리 검색이면) 더 찾아보기"""
+
+    def __init__(self, link, cat=None, opt_text="", pages=0, more=False):
+        super().__init__(timeout=900)
+        self.cat, self.opt_text, self.pages = cat, opt_text, pages
+        self.add_item(discord.ui.Button(label="📈 거래내역 보기 (mabi.zip)", style=discord.ButtonStyle.link,
+                                        url=mabizip.history_url(item_name=link[0], category=link[1],
+                                                                reforge=link[2], erg_type=link[3])))
+        if more and pages < CAT_MAX:
+            b = discord.ui.Button(label=f"🔎 더 찾아보기 (+{CAT_STEP * 500:,}개)", style=discord.ButtonStyle.secondary)
+            b.callback = self._more
+            self.add_item(b)
+
+    async def _more(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            embed, view = await option_search(None, self.cat, self.opt_text, pages=self.pages + CAT_STEP)
+        except Exception as e:
+            await interaction.followup.send(error_text(e), ephemeral=True)
+            return
+        self.stop()
+        await interaction.edit_original_response(embed=embed, view=view)
+
+
+async def option_search(name, cat, opt_text, pages=CAT_STEP):
     """현재 매물을 옵션 조건으로 걸러서 (embed, view). 무거운 계산은 별도 스레드에서"""
     more = False
     if name:
         items = await run_blocking(auction.listing, NEXON_KEY, name)
     else:
-        items, more = await run_blocking(auction.category_listing, NEXON_KEY, cat, 4)
+        items, more = await run_blocking(auction.category_listing, NEXON_KEY, cat, pages)
     embed, link = await run_blocking(_option_result, name, cat, opt_text, items, more)
-    return embed, history_view(*link)
+    return embed, OptionSearchView(link, None if name else cat, opt_text, pages, more and not name)
 
 
 def _option_result(name, cat, opt_text, items, more):
@@ -339,7 +368,7 @@ def _option_result(name, cat, opt_text, items, more):
     lines = []
     if notes:
         lines.append("**🔎 이렇게 이해했어요**\n" + "\n".join(f"• {n}" for n in notes))
-    scope = f"전체 매물 {len(items):,}개" + (" (카테고리 앞쪽 2,000개만 확인)" if more else "")
+    scope = f"전체 매물 {len(items):,}개" + (f" (카테고리 앞쪽 {len(items):,}개까지 확인 · 아래 '더 찾아보기')" if more else "")
     lines.append(f"\n조건에 맞는 매물 **{len(hits):,}개** / {scope}" if conds else f"\n{scope} · 싼 순")
     for i, (it, hit) in enumerate(hits[:10], 1):
         nm = it.get("item_display_name") or it.get("item_name")
@@ -355,8 +384,26 @@ def _option_result(name, cat, opt_text, items, more):
         lines.append(row)
     if conds and not hits and items:
         counts = options.per_condition_counts(items, conds)
-        lines.append("\n지금은 조건을 모두 만족하는 매물이 없어요. 조건 하나씩만 보면:")
+        where = f"확인한 {len(items):,}개 중에는" if more else "지금은"
+        lines.append(f"\n{where} 조건을 모두 만족하는 매물이 없어요. 조건 하나씩만 보면:")
         lines += [f"• `{c.raw}` 만족: {n}개" for c, n in zip(conds, counts)]
+        if len(conds) > 1:
+            # 조건을 가장 많이 만족하는 매물 (아깝게 빠진 것)
+            best = []
+            for it in items:
+                fs = options.facts_of(it)
+                ok = [c for c in conds if any(c.match_fact(f) for f in fs)]
+                if len(ok) == len(conds) - 1:
+                    best.append((it, ok))
+            best.sort(key=lambda x: x[0].get("auction_price_per_unit") or 0)
+            if best:
+                lines.append(f"\n**조건 {len(conds) - 1}개만 맞는 매물** (싼 순)")
+                for it, ok in best[:5]:
+                    miss = [c.raw for c in conds if c not in ok]
+                    shows = list(dict.fromkeys(f.show for f in options.facts_of(it) if any(c.match_label(f.label) for c in conds)))
+                    lines.append(f"• **{it.get('item_display_name') or it.get('item_name')}** — "
+                                 f"{auction.kgold(it.get('auction_price_per_unit') or 0)} 골드 · ❌ {', '.join(miss)}"
+                                 + (f"\n　└ " + " · ".join(shows)[:180] if shows else ""))
     if not items:
         lines.append("\n지금 이 아이템/카테고리의 매물이 없어요. 과거 거래는 아래 버튼으로 확인해 보세요.")
 

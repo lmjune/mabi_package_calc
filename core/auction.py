@@ -281,21 +281,28 @@ def smart_search(api_key, text, max_probes=3):
 
 
 def category_listing(api_key, category, max_pages=4):
-    """카테고리 현재 매물 (앞쪽 max_pages 페이지 = 최대 500×N개, 공유 캐시)"""
-    def load():
-        results, cursor = [], ""
-        for _ in range(max_pages):
+    """
+    카테고리 현재 매물 앞쪽 max_pages 페이지 (1페이지 = 500개). 반환: (매물, 더 남았는지)
+    페이지마다 따로 캐시해서 '더 찾아보기'로 늘려도 이미 본 페이지는 다시 부르지 않아요.
+    """
+    results, cursor = [], ""
+    for i in range(max_pages):
+        cur = cursor
+
+        def load(cur=cur):
             params = {"auction_item_category": category}
-            if cursor:
-                params["cursor"] = cursor
+            if cur:
+                params["cursor"] = cur
             data = _get(api_key, "list", params)
-            results.extend(data.get("auction_item") or [])
-            cursor = data.get("next_cursor")
-            if not cursor:
-                break
-        remember_names(x.get("item_name") for x in results)
-        return results, bool(cursor)          # (매물, 더 남았는지)
-    return _cached(("category", category, max_pages), load)
+            rows = data.get("auction_item") or []
+            remember_names(x.get("item_name") for x in rows)
+            return rows, data.get("next_cursor") or ""
+
+        rows, cursor = _cached(("catpage", category, i), load)
+        results.extend(rows)
+        if not cursor:
+            return results, False
+    return results, True
 
 
 def full_listing(api_key, item_name):
